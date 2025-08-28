@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: script-service-a
+  namespace: service-a-ns
+data:
+  server.js: |
+    import * as http from 'node:http';
+
+    const server = http.createServer(async (req, res) => {
+      try {
+        // Call service-b using Kubernetes in-cluster DNS
+        const resp = await fetch('http://service-b.service-b-ns.svc.cluster.local:8080');
+        const data = await resp.json();
+
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        const responseData = {
+          message: `${data.message} and Hello from service-a!`,
+          path: req.url
+        };
+        res.end(JSON.stringify(responseData));
+      } catch (error) {
+        res.writeHead(500, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify({ error: 'service-b unavailable' }));
+      }
+    });
+
+    server.listen(8080, '0.0.0.0', () => {
+      console.log('Server running on port 8080');
+    });
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-a-deployment
+  namespace: service-a-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: service-a
+  template:
+    metadata:
+      labels:
+        app: service-a
+    spec:
+      # securityContext:
+      #   runAsNonRoot: true
+      #   runAsUser: 1000
+      #   runAsGroup: 3000
+      #   fsGroup: 2000
+      #   seccompProfile:
+      #     type: RuntimeDefault
+      containers:
+      - name: server
+        image: node:alpine
+        command: ["node", "/scripts/server.js"]
+        # securityContext:
+        #   allowPrivilegeEscalation: false
+        #   readOnlyRootFilesystem: true
+        #   runAsNonRoot: true
+        #   runAsUser: 1000
+        #   runAsGroup: 3000
+        #   seccompProfile:
+        #     type: RuntimeDefault
+        #   capabilities:
+        #     drop:
+        #       - ALL
+        ports:
+        - name: http
+          protocol: TCP
+          containerPort: 8080
+        volumeMounts:
+        - name: script-volume
+          mountPath: /scripts
+      volumes:
+      - name: script-volume
+        configMap:
+          name: script-service-a
+          defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-a
+  namespace: service-a-ns
+spec:
+  selector:
+    app: service-a
+  ports:
+  - port: 8080
+    targetPort: http
+  type: ClusterIP  # Or LoadBalancer/NodePort as needed

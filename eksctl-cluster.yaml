@@ -1,0 +1,22 @@
+# run using - eksctl create cluster -f eksctl-cluster.yaml
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+    name: auto-mode-private-access
+    region: ca-central-1
+
+autoModeConfig:
+    enabled: true
+
+vpc:
+  # https://eksctl.io/usage/vpc-cluster-access/#managing-access-to-the-kubernetes-api-server-endpoints point 2 and 3
+  # turn off public endpoint later using - eksctl utils update-cluster-vpc-config --cluster=auto-mode-private-access --private-access=true --public-access=false --approve
+  clusterEndpoints:
+    privateAccess: true
+    publicAccess: true
+
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["audit", "authenticator"]
+    logRetentionInDays: 1
