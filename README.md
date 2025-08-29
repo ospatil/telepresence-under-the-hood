@@ -51,4 +51,4 @@ Refer to [Connectivity Analysis](./connectivity-analysis.md)
 
 ### Using Telepresence with Kyverno
 
-Refer to [Telepresence and Kyverno](./telepresence-and-kyverno.md)
+Refer to [Telepresence and Kyverno](./telepresence-with-kyverno.md)
