@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: script-service-c
+  namespace: service-c-ns
+data:
+  server.js: |
+    import * as http from 'node:http';
+
+    const server = http.createServer(async (req, res) => {
+      try {
+        const resp = await fetch('http://service-d.service-d-ns.svc.cluster.local:8080');
+        const data = await resp.json();
+
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        const responseData = {
+          message: `${data.message} and Hello from service-c!`,
+          path: req.url
+        };
+        res.end(JSON.stringify(responseData));
+      } catch (error) {
+        res.writeHead(500, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify({ error: 'service-d unavailable' }));
+      }
+    });
+
+    server.listen(8080, '0.0.0.0', () => {
+      console.log('Server running on port 8080');
+    });
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-c-deployment
+  namespace: service-c-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: service-c
+  template:
+    metadata:
+      labels:
+        app: service-c
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: server
+        image: docker.io/library/node:alpine
+        command: ["node", "/scripts/server.js"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 3000
+          seccompProfile:
+            type: RuntimeDefault
+          capabilities:
+            drop:
+              - ALL
+        ports:
+        - name: http
+          protocol: TCP
+          containerPort: 8080
+        volumeMounts:
+        - name: script-volume
+          mountPath: /scripts
+      volumes:
+      - name: script-volume
+        configMap:
+          name: script-service-c
+          defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-c
+  namespace: service-c-ns
+spec:
+  selector:
+    app: service-c
+  ports:
+  - port: 8080
+    targetPort: http
+  type: ClusterIP

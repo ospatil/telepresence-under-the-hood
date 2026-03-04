@@ -450,6 +450,190 @@ Traffic Agent (service-a-ns)
 └── Reports status back to traffic manager
 ```
 
+## Service Mesh mTLS and Telepresence
+
+When services run inside a service mesh, an additional encryption layer sits between Telepresence and the application. This section analyzes how Telepresence interacts with both Linkerd (sidecar model) and Istio Ambient (sidecar-less model).
+
+### How Service Mesh mTLS Changes the Traffic Path
+
+Without a mesh, Telepresence tunnels traffic directly to the application container. With a mesh, a proxy intercepts traffic before it reaches the app — encrypting it with mTLS using SPIFFE workload identities.
+
+```
+No mesh:
+  local app → telepresence tunnel → service-b pod (port 8080)
+
+Linkerd (sidecar per pod):
+  local app → telepresence tunnel → linkerd-proxy (sidecar) → service-b app (localhost:8080)
+
+Istio Ambient (ztunnel per node):
+  local app → telepresence tunnel → ztunnel (node) → service-b app (port 8080)
+```
+
+### Linkerd Sidecar Model
+
+Linkerd injects a `linkerd-proxy` sidecar into each meshed pod. The proxy handles mTLS transparently — the application sends and receives plain HTTP on localhost, while the proxy encrypts/decrypts on the wire.
+
+```
+Pod (service-a)                              Pod (service-b)
+┌─────────────────────┐                      ┌─────────────────────┐
+│ app (localhost:8080) │                      │ app (localhost:8080) │
+│        ↓             │                      │        ↑             │
+│ linkerd-proxy        │══════mTLS══════════▶ │ linkerd-proxy        │
+│ (sidecar)            │  SPIFFE identities   │ (sidecar)            │
+└─────────────────────┘                      └─────────────────────┘
+```
+
+Each proxy gets a short-lived SPIFFE identity certificate (24h) from the Linkerd identity controller:
+
+```
+spiffe://cluster.local/ns/service-a-ns/sa/default
+```
+
+During the mTLS handshake, both proxies exchange and verify these identities. The application is unaware — it only sees plain HTTP on localhost.
+
+#### Certificate Hierarchy
+
+```
+Trust Anchor (Root CA) — 10 years, managed by cert-manager
+  └── Identity Issuer (Intermediate CA) — 1 year, auto-rotated by cert-manager
+        └── Workload Certificates — 24h, auto-managed by Linkerd
+```
+
+Linkerd requires external certificate management (cert-manager in our setup). The trust anchor and identity issuer are provided during installation; Linkerd handles per-pod workload certs automatically.
+
+#### Verification
+
+```sh
+# Check mTLS edges between services
+linkerd viz edges deploy --all-namespaces
+
+# Check proxy metrics for TLS status
+linkerd diagnostics proxy-metrics -n service-a-ns deploy/service-a-deployment | grep 'service-b.*tls='
+# tls="true" and server_id="default.service-b-ns.serviceaccount.identity.linkerd.cluster.local"
+```
+
+### Istio Ambient Model
+
+Istio Ambient takes a fundamentally different approach — no sidecar is injected into application pods. Instead, a `ztunnel` DaemonSet (one per node) transparently intercepts traffic for enrolled namespaces at the network level.
+
+#### Layer 1: ztunnel (L4 — Always On)
+
+ztunnel is a lightweight Rust-based proxy that handles mTLS encryption, L4 authorization, and basic telemetry. It uses the HBONE protocol (HTTP-Based Overlay Network Encapsulation) to wrap traffic in mTLS-encrypted HTTP/2 CONNECT tunnels.
+
+```
+Pod A (Node 1)                                    Pod B (Node 2)
+┌──────────┐                                      ┌──────────┐
+│ app      │                                      │ app      │
+│ (no      │                                      │ (no      │
+│ sidecar) │                                      │ sidecar) │
+└────┬─────┘                                      └────▲─────┘
+     │ plain HTTP                                      │ plain HTTP
+     ▼                                                 │
+┌──────────┐          mTLS (HBONE)            ┌──────────┐
+│ ztunnel  │══════════════════════════════════▶│ ztunnel  │
+│ (Node 1) │  HTTP/2 CONNECT on port 15008    │ (Node 2) │
+└──────────┘  SPIFFE identities               └──────────┘
+```
+
+HBONE uses HTTP/2 CONNECT because it supports multiplexing — a single connection between two ztunnels can carry traffic for multiple pod-to-pod conversations simultaneously, reducing TLS handshake overhead.
+
+#### Layer 2: Waypoint Proxy (L7 — Optional, On Demand)
+
+ztunnel only operates at L4 (TCP). For HTTP-aware features, Istio Ambient deploys a **waypoint proxy** — a standalone Envoy pod (not a sidecar) that lives outside your application pods.
+
+Waypoint proxies provide:
+- HTTP routing (route by path, headers, method)
+- HTTP authorization policies ("only allow GET /api/orders from service-a")
+- Retries and timeouts (HTTP-aware with backoff)
+- Traffic splitting (canary deployments, A/B testing)
+- Fault injection and request mirroring
+- Per-route observability (request rate, error rate, latency)
+
+A waypoint can be scoped per namespace or per service:
+
+```sh
+# Per namespace — all services in the namespace route through it
+istioctl waypoint apply --namespace my-app --enroll-namespace
+
+# Per service — label a specific service
+kubectl label service my-service istio.io/use-waypoint=my-waypoint
+```
+
+Traffic path with a waypoint:
+
+```
+Without waypoint (L4 only):
+  Pod A → ztunnel ══mTLS══▶ ztunnel → Pod B
+
+With waypoint (L7):
+  Pod A → ztunnel ══mTLS══▶ Waypoint Pod ══mTLS══▶ ztunnel → Pod B
+                             (standalone Envoy,
+                              HTTP routing, auth,
+                              retries, etc.)
+```
+
+The waypoint is a separate Deployment — it doesn't add containers to your application pods. You only deploy it where you need L7 features, keeping the overhead zero for services that only need mTLS.
+
+#### Certificate Management
+
+Unlike Linkerd, Istio manages its own certificate hierarchy internally. istiod has a built-in CA that automatically issues and rotates SPIFFE workload certificates (24h lifetime). No external cert-manager setup is needed for the mesh itself.
+
+#### Verification
+
+```sh
+# Check workload enrollment — HBONE means mTLS via ztunnel
+istioctl ztunnel-config workloads | grep -E 'service-c|service-d'
+# PROTOCOL=HBONE confirms enrollment
+```
+
+### Why Telepresence Works with Both Meshes
+
+Both Linkerd and Istio Ambient default to **PERMISSIVE** mTLS mode — they accept both mTLS connections (from meshed pods) and plain HTTP connections (from unmeshed sources).
+
+When Telepresence intercepts a service:
+
+1. **Inbound traffic**: Telepresence's traffic agent receives the request. In Linkerd, the agent sits alongside the sidecar. In Ambient, ztunnel handles the interception at the node level. Both accept the Telepresence agent's plain HTTP.
+
+2. **Outbound traffic from local machine**: The local application calls other cluster services (e.g., service-b or service-d). This traffic arrives at the destination as plain HTTP. The receiving mesh proxy/ztunnel accepts it in PERMISSIVE mode.
+
+```
+Telepresence intercept with Linkerd:
+  local machine ──plain HTTP──▶ linkerd-proxy (service-b) ──▶ service-b app
+                                 accepts plain HTTP in
+                                 PERMISSIVE mode ✓
+
+Telepresence intercept with Istio Ambient:
+  local machine ──plain HTTP──▶ ztunnel (node) ──▶ service-b app
+                                 accepts plain HTTP in
+                                 PERMISSIVE mode ✓
+```
+
+This is the recommended approach for development environments per both Linkerd and Istio documentation. In production, STRICT mode would be used, and dev namespaces would remain PERMISSIVE.
+
+### Wire-Level Validation
+
+The most definitive proof of mTLS is capturing traffic with tcpdump from an ephemeral debug container inside the pod. Two captures on the same pod show the contrast:
+
+**External traffic (between pods) — encrypted:**
+
+```sh
+kubectl debug -it <pod> -n <namespace> --image=nicolaka/netshoot \
+  -- tcpdump -i any -A 'not host 127.0.0.1' -c 50
+```
+
+Shows encrypted binary data — no readable HTTP text.
+
+**Localhost traffic (proxy to app inside pod) — decrypted:**
+
+```sh
+kubectl debug -it <pod> -n <namespace> --image=nicolaka/netshoot \
+  -- tcpdump -i any -A port 8080 -c 50
+```
+
+Shows plain HTTP text like `GET / HTTP/1.1` and `Hello from service-b`.
+
+The first capture filters out localhost to show only inter-pod traffic (mTLS encrypted). The second captures the proxy-to-app leg on localhost (plain HTTP after decryption). The contrast proves mTLS is active on the wire.
+
 ## Summary
 
 This Telepresence setup provides seamless local development against a private EKS cluster through:
@@ -458,5 +642,6 @@ This Telepresence setup provides seamless local development against a private EK
 2. **Network Transparency**: TUN interface routes cluster traffic seamlessly
 3. **DNS Integration**: Local DNS server resolves Kubernetes service names automatically
 4. **Sidecar Injection**: Automatic traffic agent deployment for seamless traffic interception
+5. **Service Mesh Compatibility**: Works transparently with both Linkerd (sidecar) and Istio Ambient (sidecar-less) in PERMISSIVE mTLS mode, enabling local development against mTLS-encrypted services without additional configuration
 
-The architecture enables developers to work locally while maintaining full connectivity to remote cluster services, with transparent service discovery and network routing.
+The architecture enables developers to work locally while maintaining full connectivity to remote cluster services, with transparent service discovery, network routing, and service mesh interoperability.

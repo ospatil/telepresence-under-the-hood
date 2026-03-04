@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: script-service-d
+  namespace: service-d-ns
+data:
+  server.js: |
+    import * as http from 'node:http';
+
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, {'Content-Type': 'application/json'});
+      const responseData = {
+        message: 'Hello from service-d!',
+        path: req.url
+      };
+      res.end(JSON.stringify(responseData));
+    });
+
+    server.listen(8080, '0.0.0.0', () => {
+      console.log('Server running on port 8080');
+    });
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-d-deployment
+  namespace: service-d-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: service-d
+  template:
+    metadata:
+      labels:
+        app: service-d
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: server
+        image: docker.io/library/node:alpine
+        command: ["node", "/scripts/server.js"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 3000
+          seccompProfile:
+            type: RuntimeDefault
+          capabilities:
+            drop:
+              - ALL
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: script-volume
+          mountPath: /scripts
+      volumes:
+      - name: script-volume
+        configMap:
+          name: script-service-d
+          defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-d
+  namespace: service-d-ns
+spec:
+  selector:
+    app: service-d
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP

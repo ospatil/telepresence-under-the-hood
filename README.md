@@ -37,11 +37,31 @@
 * List the deployments ready to be engaged - `telepresence list`
 * Verify you can call services from local machine using in-cluster kubernetes DNS names - `curl service-a.service-a-ns:8080`
 
-#### Usage
+#### Usage - Global Intercept
+
+This intercepts **all** traffic to service-a and routes it to your local machine.
 
 * Intercept a service port - `telepresence intercept service-a-deployment --port 8080:8080`
   * Now we can run the local "service-a" application - `node local.js` and see the calls to the service being routed to our local machine. We can test it by running `curl service-a.service-a-ns:8080`.
   * This also demonstrates that our code running locally can call `service-b` which is running in the cluster.
+* Stop proxying - `telepresence leave service-a-deployment`
+* Stop local Telepresence Daemons - `telepresence quit -s`
+
+#### Usage - Header-Based Routing (Personal Intercept)
+
+This intercepts only requests matching a specific HTTP header, allowing multiple developers to work on the same service simultaneously without interfering with each other. Requires Telepresence >= 2.25.
+
+* Start local service-a - `node local.js`
+* Create a personal intercept with a header filter -
+  `telepresence intercept service-a-deployment --port 8080:8080 --http-header x-dev=local`
+* Test **with** header — traffic is routed to your local machine:
+  `curl -H "x-dev: local" http://service-a.service-a-ns:8080`
+  * Response: `"Hello from service-b! and Hello from local service-a!"`
+* Test **without** header — traffic goes to the in-cluster service-a as normal:
+  `curl http://service-a.service-a-ns:8080`
+  * Response: `"Hello from service-b! and Hello from service-a!"`
+* A second developer can intercept with a different header value without conflict:
+  `telepresence intercept service-a-deployment --port 8080:8080 --http-header x-dev=dev2`
 * Stop proxying - `telepresence leave service-a-deployment`
 * Stop local Telepresence Daemons - `telepresence quit -s`
 
@@ -52,3 +72,8 @@ Refer to [Connectivity Analysis](./connectivity-analysis.md)
 ### Using Telepresence with Kyverno
 
 Refer to [Telepresence and Kyverno](./telepresence-with-kyverno.md)
+
+### mTLS with Service Meshes
+
+* [East-West mTLS with Linkerd + Telepresence](./mtls-demo.md)
+* [East-West mTLS with Istio Ambient + Telepresence](./istio-ambient-demo.md)
