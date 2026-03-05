@@ -104,3 +104,22 @@ The unencrypted legs never leave their trust boundary:
 | Istio Ambient | ztunnel ↔ app (same node) | Node | Attacker needs node-level access |
 
 Istio Ambient's trust boundary is slightly wider (node vs pod), which is the trade-off for not needing sidecars. This is considered acceptable because Kubernetes itself trusts the node — kubelet already has access to all pod secrets on that node. Node-level access implies full compromise regardless of encryption.
+
+#### Linkerd vs Istio Ambient: Which to Choose?
+
+| Aspect | Linkerd | Istio Ambient |
+|---|---|---|
+| Data plane model | Sidecar per pod (~20MB each) | ztunnel DaemonSet per node (~30MB each) |
+| Mesh enrollment | Annotation + pod restart | Namespace label (instant, no restart) |
+| Control plane size | ~250MB | ~1GB (istiod) |
+| Certificate management | External (cert-manager required) | Built-in CA (istiod), external CA optional via istio-csr |
+| L7 features | Built into sidecar (always available) | Requires waypoint proxy (on demand) |
+| Ecosystem | Smaller, focused | Large (Kiali, Gateway API, multi-cluster, extensive policy model) |
+| OSS release model | Edge releases only since Feb 2024; stable releases require Buoyant Enterprise | Stable releases backed by Google/Solo.io |
+| Telepresence compatibility | Works in PERMISSIVE mode | Works in PERMISSIVE mode |
+
+**When to pick Linkerd**: Small clusters where simplicity and minimal resource overhead matter most. Fewer moving parts, faster to learn and debug. Best when you just need mTLS without complex traffic policies.
+
+**When to pick Istio Ambient**: Most other cases. The sidecar-less model closes Linkerd's main architectural advantage, while Istio offers a larger ecosystem, built-in CA, L7 extensibility, and stronger long-term OSS community momentum. The better default choice for production unless you have a specific reason to prefer Linkerd's simplicity.
+
+**A note on Cilium Service Mesh**: Cilium offers eBPF-based mTLS at the kernel level — no sidecars or per-node proxies — with excellent performance. However, it requires Cilium as your CNI. It cannot layer on top of AWS VPC CNI or other CNIs for mesh features. If you're on EKS with VPC CNI and don't want to swap it out, Cilium's mesh isn't an option. If you're open to replacing VPC CNI, Cilium's [AWS ENI mode](https://docs.cilium.io/en/stable/network/concepts/ipam/eni/) preserves native VPC networking (routable pod IPs, security groups) while enabling mesh capabilities. Both Istio Ambient and Linkerd are CNI-agnostic and work alongside any CNI.

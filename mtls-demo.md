@@ -127,6 +127,40 @@ kubectl get secret linkerd-trust-anchor -n linkerd \
   -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
 ```
 
+### Production Alternative: AWS Private CA
+
+For production, replace the self-signed bootstrap with [aws-privateca-issuer](https://github.com/cert-manager/aws-privateca-issuer) backed by AWS Private CA. This gives you HSM-backed key storage, audit logging, and managed CA infrastructure. AWS PCA's short-lived certificate mode (~$50/month) is ideal since Linkerd workload certs are typically 24h.
+
+Install the issuer plugin:
+
+```bash
+helm repo add awspca https://cert-manager.github.io/aws-privateca-issuer
+helm install aws-pca-issuer awspca/aws-privateca-issuer -n cert-manager
+```
+
+Then replace the `selfsigned-bootstrap` ClusterIssuer with:
+
+```yaml
+apiVersion: awspca.cert-manager.io/v1beta1
+kind: AWSPCAClusterIssuer
+metadata:
+  name: aws-pca-issuer
+spec:
+  arn: arn:aws:acm-pca:<region>:<account>:certificate-authority/<ca-id>
+  region: <region>
+```
+
+And update the `linkerd-trust-anchor` Certificate's `issuerRef` to point to it:
+
+```yaml
+issuerRef:
+  name: aws-pca-issuer
+  group: awspca.cert-manager.io
+  kind: AWSPCAClusterIssuer
+```
+
+The rest of the setup (identity issuer, Linkerd install, mesh injection) remains identical — only the root of the certificate chain changes.
+
 ## Phase 2: Install Linkerd
 
 ### 2.1 Install Linkerd CLI
@@ -364,7 +398,7 @@ telepresence quit -s
 
 ## Design Decisions
 
-1. **cert-manager in-cluster CA** — cert-manager is already installed. Using the self-signed bootstrap approach avoids local cert generation and is fully automated. For production, swap to AWS Private CA (~$50/month) for HSM-backed keys.
+1. **cert-manager in-cluster CA** — cert-manager is already installed. Using the self-signed bootstrap approach avoids local cert generation and is fully automated. For production, swap to AWS Private CA using `aws-privateca-issuer` — see [Production Alternative: AWS Private CA](#production-alternative-aws-private-ca). AWS PCA's short-lived certificate mode (~$50/month) provides HSM-backed keys and audit logging with no revocation overhead.
 
 2. **Linkerd edge releases** — Since February 2024, the Linkerd open source project only produces edge releases. Stable releases (e.g., 2.19) are announced as version milestones but the actual artifacts are edge releases (e.g., `edge-25.10.7`). Vendor-provided stable releases (with semantic versioning and backported fixes) are available through Buoyant Enterprise. For this demo, edge releases are the standard OSS path.
 

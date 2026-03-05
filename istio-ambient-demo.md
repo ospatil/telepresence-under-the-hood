@@ -70,6 +70,50 @@ kubectl get pods -n istio-system
 # Should see: istiod, istio-cni-node (per node), ztunnel (per node)
 ```
 
+### Production Alternative: AWS Private CA
+
+For production, you can replace istiod's built-in CA with AWS Private CA. Unlike Linkerd (which already uses cert-manager), Istio manages its own certs internally, so the integration requires [istio-csr](https://github.com/cert-manager/istio-csr) as a bridge between istiod and cert-manager.
+
+Install the components:
+
+```bash
+# cert-manager (if not already installed)
+helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace --set crds.enabled=true
+
+# AWS PCA issuer plugin
+helm repo add awspca https://cert-manager.github.io/aws-privateca-issuer
+helm install aws-pca-issuer awspca/aws-privateca-issuer -n cert-manager
+
+# istio-csr — bridges istiod cert requests to cert-manager
+helm repo add jetstack https://charts.jetstack.io
+helm install istio-csr jetstack/cert-manager-istio-csr -n cert-manager \
+  --set certificate.issuerRef.name=aws-pca-issuer \
+  --set certificate.issuerRef.kind=AWSPCAClusterIssuer \
+  --set certificate.issuerRef.group=awspca.cert-manager.io
+```
+
+Create the AWS PCA issuer:
+
+```yaml
+apiVersion: awspca.cert-manager.io/v1beta1
+kind: AWSPCAClusterIssuer
+metadata:
+  name: aws-pca-issuer
+spec:
+  arn: arn:aws:acm-pca:<region>:<account>:certificate-authority/<ca-id>
+  region: <region>
+```
+
+Then install istiod with the external CA flag:
+
+```bash
+helm install istiod istio/istiod -n istio-system \
+  --set profile=ambient \
+  --set pilot.env.ENABLE_CA_SERVER=false
+```
+
+Setting `ENABLE_CA_SERVER=false` tells istiod to delegate certificate signing to `istio-csr` (which forwards to cert-manager → AWS PCA) instead of using its built-in CA. The rest of the setup (ztunnel, namespace enrollment, Telepresence) remains identical.
+
 ## Phase 2: Deploy Istio Demo Services
 
 ### 2.1 Create namespaces and enroll in ambient mesh
@@ -227,7 +271,7 @@ telepresence quit -s
 
 1. **No waypoint proxy** — We only need mTLS (L4). Waypoint proxies are for L7 features (HTTP routing, retries, auth policies) and add unnecessary complexity for this demo.
 
-2. **Istio manages its own certs** — Unlike Linkerd which requires external cert management (cert-manager), istiod has a built-in CA that automatically issues and rotates workload certificates. No additional cert setup needed.
+2. **Istio manages its own certs** — Unlike Linkerd which requires external cert management (cert-manager), istiod has a built-in CA that automatically issues and rotates workload certificates. No additional cert setup needed. For production, you can swap to AWS Private CA via `istio-csr` + `aws-privateca-issuer` — see [Production Alternative: AWS Private CA](#production-alternative-aws-private-ca).
 
 3. **PERMISSIVE mTLS** — Default mode, same as Linkerd. Accepts both mTLS and plain HTTP, enabling Telepresence compatibility without configuration changes.
 
