@@ -77,3 +77,30 @@ Refer to [Telepresence and Kyverno](./telepresence-with-kyverno.md)
 
 * [East-West mTLS with Linkerd + Telepresence](./mtls-demo.md)
 * [East-West mTLS with Istio Ambient + Telepresence](./istio-ambient-demo.md)
+
+#### Understanding the mTLS Encryption Boundary
+
+Neither service mesh model provides true end-to-end encryption from app process to app process. Both encrypt the **network hop between nodes** — the segment where traffic is actually at risk — and terminate encryption at a proxy boundary.
+
+```
+Linkerd (sidecar per pod):
+  app ──plain──▶ linkerd-proxy ══mTLS══▶ linkerd-proxy ──plain──▶ app
+                 (same pod)              (same pod)
+  └─── pod boundary ───┘                └─── pod boundary ───┘
+
+Istio Ambient (ztunnel per node):
+  app ──plain──▶ ztunnel ══════mTLS══════▶ ztunnel ──plain──▶ app
+                 (same node)               (same node)
+  └─── node boundary ───┘                 └─── node boundary ───┘
+```
+
+The unencrypted legs never leave their trust boundary:
+- **Linkerd**: app ↔ sidecar is localhost within the same pod
+- **Istio Ambient**: app ↔ ztunnel is local traffic within the same node
+
+| | Unencrypted leg | Trust boundary | Implication |
+|---|---|---|---|
+| Linkerd sidecar | proxy ↔ app (same pod) | Pod | Attacker needs pod-level access |
+| Istio Ambient | ztunnel ↔ app (same node) | Node | Attacker needs node-level access |
+
+Istio Ambient's trust boundary is slightly wider (node vs pod), which is the trade-off for not needing sidecars. This is considered acceptable because Kubernetes itself trusts the node — kubelet already has access to all pod secrets on that node. Node-level access implies full compromise regardless of encryption.
