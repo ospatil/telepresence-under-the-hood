@@ -105,6 +105,22 @@ The unencrypted legs never leave their trust boundary:
 
 Istio Ambient's trust boundary is slightly wider (node vs pod), which is the trade-off for not needing sidecars. This is considered acceptable because Kubernetes itself trusts the node — kubelet already has access to all pod secrets on that node. Node-level access implies full compromise regardless of encryption.
 
+#### Privileged Pod Risk and Mitigation
+
+A privileged pod (or one with `hostNetwork: true`, `CAP_NET_RAW`, `CAP_NET_ADMIN`) running on the same node can sniff the unencrypted ztunnel ↔ app traffic, breaking Ambient's trust model. This also applies to Linkerd — a privileged pod can sniff traffic before it enters the sidecar. The attack surface is slightly wider with Ambient (node vs pod), but a privileged pod breaks both models.
+
+**Mitigation: Pod Security Standards (PSA)** — built into Kubernetes 1.25+, no extra tooling needed:
+
+```bash
+kubectl label ns <namespace> \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/warn=restricted
+```
+
+The `restricted` profile blocks `privileged: true`, `hostNetwork`, dangerous capabilities, and requires non-root containers. Enforce it on all application namespaces by default.
+
+**For custom policies beyond pod security** (image allowlists, required labels, resource limits), layer [Kyverno](./telepresence-with-kyverno.md) or OPA Gatekeeper on top. PSA is the floor; policy engines handle everything else.
+
 #### Linkerd vs Istio Ambient: Which to Choose?
 
 | Aspect | Linkerd | Istio Ambient |
