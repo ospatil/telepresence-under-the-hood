@@ -77,6 +77,7 @@ Refer to [Telepresence and Kyverno](./telepresence-with-kyverno.md)
 
 * [East-West mTLS with Linkerd + Telepresence](./mtls-demo.md)
 * [East-West mTLS with Istio Ambient + Telepresence](./istio-ambient-demo.md)
+* [Bespoke Sidecar mTLS — Lightweight Alternative](./bespoke-sidecar-mtls.md)
 
 #### Understanding the mTLS Encryption Boundary
 
