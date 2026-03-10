@@ -1,0 +1,28 @@
+---
+# Identity Issuer (Intermediate CA) — issued directly by AWS PCA
+# PCA acts as the trust anchor, so we skip the separate trust-anchor cert.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: linkerd-identity-issuer
+  namespace: linkerd
+spec:
+  isCA: true
+  commonName: identity.linkerd.cluster.local
+  secretName: linkerd-identity-issuer
+  duration: 8760h
+  renewBefore: 2160h
+  dnsNames:
+    - identity.linkerd.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - cert sign
+    - crl sign
+    - server auth
+    - client auth
+  issuerRef:
+    name: aws-pca-issuer
+    group: awspca.cert-manager.io
+    kind: AWSPCAClusterIssuer

@@ -129,7 +129,19 @@ kubectl get secret linkerd-trust-anchor -n linkerd \
 
 ### Production Alternative: AWS Private CA
 
-For production, replace the self-signed bootstrap with [aws-privateca-issuer](https://github.com/cert-manager/aws-privateca-issuer) backed by AWS Private CA. This gives you HSM-backed key storage, audit logging, and managed CA infrastructure. AWS PCA's short-lived certificate mode (~$50/month) is ideal since Linkerd workload certs are typically 24h.
+For production, replace the self-signed bootstrap with [aws-privateca-issuer](https://github.com/cert-manager/aws-privateca-issuer) backed by AWS Private CA. This gives you HSM-backed key storage, audit logging, and managed CA infrastructure.
+
+**Important**: AWS PCA's `BlankEndEntityCertificate_APICSRPassthrough/V1` template (used for CA certs) sets `pathlen:0`. This means the original 3-level chain (PCA → trust anchor → identity issuer → workload certs) won't work — the trust anchor can't issue sub-CAs. The solution is to use PCA directly as the trust anchor, simplifying to a 2-level chain:
+
+```
+Self-signed (this demo):
+  selfsigned-bootstrap → trust-anchor → identity-issuer → workload certs
+
+AWS PCA (production):
+  AWS PCA (trust anchor) → identity-issuer → workload certs
+```
+
+**Note on PCA mode**: Use `GENERAL_PURPOSE` mode (~$400/month) since the identity issuer is a CA cert with 1-year validity. `SHORT_LIVED_CERTIFICATE` mode (~$50/month) only supports certs ≤7 days.
 
 Install the issuer plugin:
 
@@ -138,7 +150,7 @@ helm repo add awspca https://cert-manager.github.io/aws-privateca-issuer
 helm install aws-pca-issuer awspca/aws-privateca-issuer -n cert-manager
 ```
 
-Then replace the `selfsigned-bootstrap` ClusterIssuer with:
+Create the issuer:
 
 ```yaml
 apiVersion: awspca.cert-manager.io/v1beta1
@@ -150,7 +162,7 @@ spec:
   region: <region>
 ```
 
-And update the `linkerd-trust-anchor` Certificate's `issuerRef` to point to it:
+Remove the `selfsigned-bootstrap` ClusterIssuer and `linkerd-trust-anchor` Certificate/Issuer. Issue the `linkerd-identity-issuer` directly from PCA:
 
 ```yaml
 issuerRef:
@@ -159,7 +171,15 @@ issuerRef:
   kind: AWSPCAClusterIssuer
 ```
 
-The rest of the setup (identity issuer, Linkerd install, mesh injection) remains identical — only the root of the certificate chain changes.
+Pass the PCA root certificate (not a cert-manager secret) as the trust anchor to Linkerd:
+
+```bash
+aws acm-pca get-certificate-authority-certificate \
+  --certificate-authority-arn <ca-arn> --region <region> \
+  --query 'Certificate' --output text > ca.crt
+```
+
+See `setup-linkerd-pca.sh` for the full automated setup.
 
 ## Phase 2: Install Linkerd
 
@@ -398,7 +418,7 @@ telepresence quit -s
 
 ## Design Decisions
 
-1. **cert-manager in-cluster CA** — cert-manager is already installed. Using the self-signed bootstrap approach avoids local cert generation and is fully automated. For production, swap to AWS Private CA using `aws-privateca-issuer` — see [Production Alternative: AWS Private CA](#production-alternative-aws-private-ca). AWS PCA's short-lived certificate mode (~$50/month) provides HSM-backed keys and audit logging with no revocation overhead.
+1. **cert-manager in-cluster CA** — cert-manager is already installed. Using the self-signed bootstrap approach avoids local cert generation and is fully automated. For production, swap to AWS Private CA using `aws-privateca-issuer` — see [Production Alternative: AWS Private CA](#production-alternative-aws-private-ca). Note: AWS PCA requires `GENERAL_PURPOSE` mode (~$400/month) for Linkerd since the identity issuer is a long-lived CA cert. The chain is also simplified to 2 levels (PCA as trust anchor) due to PCA's `pathlen:0` constraint on issued CA certs.
 
 2. **Linkerd edge releases** — Since February 2024, the Linkerd open source project only produces edge releases. Stable releases (e.g., 2.19) are announced as version milestones but the actual artifacts are edge releases (e.g., `edge-25.10.7`). Vendor-provided stable releases (with semantic versioning and backported fixes) are available through Buoyant Enterprise. For this demo, edge releases are the standard OSS path.
 

@@ -44,7 +44,7 @@ volumes:
         csi.cert-manager.io/renew-before: 15m
 ```
 
-The sidecar proxy reads certs from the mounted path. Works with any cert-manager issuer including `aws-privateca-issuer` for production (see [AWS Private CA notes in the Linkerd demo](./mtls-demo.md#production-alternative-aws-private-ca)).
+The sidecar proxy reads certs from the mounted path. Works with any cert-manager issuer including `aws-privateca-issuer` for production (see [AWS Private CA notes in the Linkerd demo](./linkerd/mtls-demo.md#production-alternative-aws-private-ca)).
 
 **Pros**: zero custom code for cert management, battle-tested, auto-renewal built in
 **Cons**: requires cert-manager + CSI driver installed in cluster
@@ -106,7 +106,7 @@ One consistent TLS layer for all traffic paths, managed by the same cert pipelin
 
 Service meshes inject sidecars automatically via mutating webhooks. For bespoke sidecars:
 - **Manual**: add the sidecar container to every deployment YAML — simple but doesn't scale
-- **Kyverno mutating policy**: auto-inject the sidecar + volume mounts on pod creation (see [Telepresence and Kyverno](./telepresence-with-kyverno.md)). More maintainable than a custom webhook
+- **Kyverno mutating policy**: auto-inject the sidecar + volume mounts on pod creation (see [Telepresence and Kyverno](../policy/telepresence-with-kyverno.md)). More maintainable than a custom webhook
 - **Custom mutating admission webhook**: most flexible but more code to maintain
 
 ### Certificate Reload Without Downtime

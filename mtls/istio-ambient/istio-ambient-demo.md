@@ -85,11 +85,13 @@ helm repo add awspca https://cert-manager.github.io/aws-privateca-issuer
 helm install aws-pca-issuer awspca/aws-privateca-issuer -n cert-manager
 
 # istio-csr — bridges istiod cert requests to cert-manager
+# caTrustedNodeAccounts enables ambient mode (ztunnel cert requests)
 helm repo add jetstack https://charts.jetstack.io
 helm install istio-csr jetstack/cert-manager-istio-csr -n cert-manager \
-  --set certificate.issuerRef.name=aws-pca-issuer \
-  --set certificate.issuerRef.kind=AWSPCAClusterIssuer \
-  --set certificate.issuerRef.group=awspca.cert-manager.io
+  --set app.certmanager.issuer.name=aws-pca-issuer \
+  --set app.certmanager.issuer.kind=AWSPCAClusterIssuer \
+  --set app.certmanager.issuer.group=awspca.cert-manager.io \
+  --set app.server.caTrustedNodeAccounts=istio-system/ztunnel
 ```
 
 Create the AWS PCA issuer:
@@ -104,15 +106,19 @@ spec:
   region: <region>
 ```
 
-Then install istiod with the external CA flag:
+Then install istiod and ztunnel with external CA configuration:
 
 ```bash
 helm install istiod istio/istiod -n istio-system \
   --set profile=ambient \
   --set pilot.env.ENABLE_CA_SERVER=false
+
+# ztunnel must point at istio-csr for cert signing (not istiod)
+helm install ztunnel istio/ztunnel -n istio-system \
+  --set caAddress=cert-manager-istio-csr.cert-manager.svc:443
 ```
 
-Setting `ENABLE_CA_SERVER=false` tells istiod to delegate certificate signing to `istio-csr` (which forwards to cert-manager → AWS PCA) instead of using its built-in CA. The rest of the setup (ztunnel, namespace enrollment, Telepresence) remains identical.
+`ENABLE_CA_SERVER=false` disables istiod's built-in CA. The ztunnel `caAddress` directs workload cert requests to `istio-csr` (which forwards to cert-manager → AWS PCA). `caTrustedNodeAccounts` allows ztunnel's service account to request certs on behalf of workloads on its node. See `setup-istio-pca.sh` for the full automated setup.
 
 ## Phase 2: Deploy Istio Demo Services
 

@@ -13,20 +13,14 @@
 1. Start port-forwarding session with bastion -
     `aws ssm start-session --target i-<instance-id> --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters "host=<eks-cluster-id>.gr7.ca-central-1.eks.amazonaws.com,portNumber=443,localPortNumber=4443"`
 1. Update kube config -
-    `aws eks update-kubeconfig --name auto-mode-private-access --region ca-central-1 && kubectl config set-cluster arn:aws:eks:ca-central-1:<account-id>:cluster/auto-mode-private-access --insecure-skip-tls-verify=true --server=https://localhost:4443`
+    `aws eks update-kubeconfig --name auto-mode-private-access --region ca-central-1 --alias auto-mode-private-access && kubectl config set-cluster auto-mode-private-access --insecure-skip-tls-verify=true --server=https://localhost:4443`
 
-### Kubernetes resource creation
+### Kubernetes resource creation and Telepresence install
 
-1. Create namespace for `service-a` - `kubectl create ns service-a-ns`
-1. Create namespace for `service-b` - `kubectl create ns service-b-ns`
-1. Create `service-b` resources - `kubectl apply -f b-manifest.yaml`
-1. Create `service-a` resources - `kubectl apply -f a-manifest.yaml`
-
-### Install telepresence
-
-1. Install telepresence client on local machine using platform-specific mechanism -
+1. Install telepresence client on local machine -
    `brew install telepresenceio/telepresence/telepresence-oss`
-1. Install Traffic manager in the cluster - `telepresence helm install`
+1. Run the setup script (deploys services and installs traffic manager) -
+   `./setup.sh`
 
 ### Telepresence
 
@@ -42,7 +36,7 @@
 This intercepts **all** traffic to service-a and routes it to your local machine.
 
 * Intercept a service port - `telepresence intercept service-a-deployment --port 8080:8080`
-  * Now we can run the local "service-a" application - `node local.js` and see the calls to the service being routed to our local machine. We can test it by running `curl service-a.service-a-ns:8080`.
+  * Now we can run the local "service-a" application - `node services/local.js` and see the calls to the service being routed to our local machine. We can test it by running `curl service-a.service-a-ns:8080`.
   * This also demonstrates that our code running locally can call `service-b` which is running in the cluster.
 * Stop proxying - `telepresence leave service-a-deployment`
 * Stop local Telepresence Daemons - `telepresence quit -s`
@@ -51,7 +45,7 @@ This intercepts **all** traffic to service-a and routes it to your local machine
 
 This intercepts only requests matching a specific HTTP header, allowing multiple developers to work on the same service simultaneously without interfering with each other. Requires Telepresence >= 2.25.
 
-* Start local service-a - `node local.js`
+* Start local service-a - `node services/local.js`
 * Create a personal intercept with a header filter -
   `telepresence intercept service-a-deployment --port 8080:8080 --http-header x-dev=local`
 * Test **with** header — traffic is routed to your local machine:
@@ -71,13 +65,13 @@ Refer to [Connectivity Analysis](./connectivity-analysis.md)
 
 ### Using Telepresence with Kyverno
 
-Refer to [Telepresence and Kyverno](./telepresence-with-kyverno.md)
+Refer to [Telepresence and Kyverno](./policy/telepresence-with-kyverno.md)
 
 ### mTLS with Service Meshes
 
-* [East-West mTLS with Linkerd + Telepresence](./mtls-demo.md)
-* [East-West mTLS with Istio Ambient + Telepresence](./istio-ambient-demo.md)
-* [Bespoke Sidecar mTLS — Lightweight Alternative](./bespoke-sidecar-mtls.md)
+* [East-West mTLS with Linkerd + Telepresence](./mtls/linkerd/mtls-demo.md)
+* [East-West mTLS with Istio Ambient + Telepresence](./mtls/istio-ambient/istio-ambient-demo.md)
+* [Bespoke Sidecar mTLS — Lightweight Alternative](./mtls/bespoke-sidecar-mtls.md)
 
 #### Understanding the mTLS Encryption Boundary
 
@@ -120,7 +114,7 @@ kubectl label ns <namespace> \
 
 The `restricted` profile blocks `privileged: true`, `hostNetwork`, dangerous capabilities, and requires non-root containers. Enforce it on all application namespaces by default.
 
-**For custom policies beyond pod security** (image allowlists, required labels, resource limits), layer [Kyverno](./telepresence-with-kyverno.md) or OPA Gatekeeper on top. PSA is the floor; policy engines handle everything else.
+**For custom policies beyond pod security** (image allowlists, required labels, resource limits), layer [Kyverno](./policy/telepresence-with-kyverno.md) or OPA Gatekeeper on top. PSA is the floor; policy engines handle everything else.
 
 #### Linkerd vs Istio Ambient: Which to Choose?
 
