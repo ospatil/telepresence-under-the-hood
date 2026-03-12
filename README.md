@@ -73,6 +73,10 @@ Refer to [Telepresence and Kyverno](./policy/telepresence-with-kyverno.md)
 * [East-West mTLS with Istio Ambient + Telepresence](./mtls/istio-ambient/istio-ambient-demo.md)
 * [Bespoke Sidecar mTLS — Lightweight Alternative](./mtls/bespoke-sidecar-mtls.md)
 
+### End-to-End App Managed TLS with cert-manager CSI Driver
+
+* [E2E TLS Demo — AWS PCA + cert-manager + Spring Boot + Telepresence](./mtls/e2e-tls-demo/README.md)
+
 #### Understanding the mTLS Encryption Boundary
 
 Neither service mesh model provides true end-to-end encryption from app process to app process. Both encrypt the **network hop between nodes** — the segment where traffic is actually at risk — and terminate encryption at a proxy boundary.
