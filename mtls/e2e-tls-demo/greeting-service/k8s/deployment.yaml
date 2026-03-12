@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: greeting-service
+  namespace: greeting-service-ns
+  labels:
+    app: greeting-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: greeting-service
+  template:
+    metadata:
+      labels:
+        app: greeting-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: greeting-service
+          image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/greeting-service:latest
+          ports:
+            - name: https
+              containerPort: 8443
+            - name: management
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          volumeMounts:
+            - name: tls
+              mountPath: /certs
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: management
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: management
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: tls
+          csi:
+            driver: csi.cert-manager.io
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-name: aws-pca-issuer
+              csi.cert-manager.io/issuer-kind: AWSPCAClusterIssuer
+              csi.cert-manager.io/issuer-group: awspca.cert-manager.io
+              csi.cert-manager.io/common-name: greeting-service
+              csi.cert-manager.io/dns-names: greeting-service.greeting-service-ns.svc.cluster.local
+              csi.cert-manager.io/duration: "24h"
+              csi.cert-manager.io/renew-before: "4h"
+              csi.cert-manager.io/key-algorithm: ECDSA
+              csi.cert-manager.io/key-size: "256"
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: greeting-service
+  namespace: greeting-service-ns
+  labels:
+    app: greeting-service
+spec:
+  type: ClusterIP
+  selector:
+    app: greeting-service
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+    - name: management
+      port: 8080
+      targetPort: management

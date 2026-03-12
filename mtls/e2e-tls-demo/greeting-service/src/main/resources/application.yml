@@ -1,0 +1,27 @@
+server:
+  port: 8443
+  ssl:
+    bundle: server
+
+management:
+  server:
+    port: 8080
+    ssl:
+      enabled: false
+
+spring:
+  application:
+    name: greeting-service
+  ssl:
+    bundle:
+      pem:
+        server:
+          keystore:
+            certificate: /certs/tls.crt
+            private-key: /certs/tls.key
+          truststore:
+            certificate: /certs/ca.crt
+          reload-on-update: true
+        client:
+          truststore:
+            certificate: /certs/ca.crt

@@ -1,0 +1,17 @@
+# Environment configuration (contains secrets)
+.env
+
+# Extracted certificates
+.certs/
+
+# Build artifacts
+target/
+*.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
