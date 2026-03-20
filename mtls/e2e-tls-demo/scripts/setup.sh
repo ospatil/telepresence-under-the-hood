@@ -68,13 +68,14 @@ echo "=== Phase 1: AWS Private CA Hierarchy ==="
 create_subordinate_ca() {
   local cn=$1
   local root_arn=$2
+  local usage_mode=${3:-SHORT_LIVED_CERTIFICATE}
 
   local sub_arn
   sub_arn=$(aws acm-pca create-certificate-authority \
     --certificate-authority-configuration \
       "KeyAlgorithm=EC_prime256v1,SigningAlgorithm=SHA256WITHECDSA,Subject={CommonName=${cn}}" \
     --certificate-authority-type SUBORDINATE \
-    --usage-mode GENERAL_PURPOSE \
+    --usage-mode "$usage_mode" \
     --region "$AWS_REGION" \
     --query 'CertificateAuthorityArn' --output text)
 
@@ -254,7 +255,7 @@ aws lambda create-function \
   --role "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ROLE_PREFIX}-lambda-role" \
   --zip-file fileb:///tmp/e2e-tls-lambda.zip \
   --timeout 30 \
-  --environment "Variables={DEV_CA_ARN=${DEV_CA_ARN},ROOT_CA_ARN=${ROOT_CA_ARN},VALIDITY_DAYS=30}" \
+  --environment "Variables={DEV_CA_ARN=${DEV_CA_ARN},ROOT_CA_ARN=${ROOT_CA_ARN},VALIDITY_DAYS=7}" \
   --region "$AWS_REGION" > /dev/null
 
 echo "Lambda deployed: $LAMBDA_NAME"

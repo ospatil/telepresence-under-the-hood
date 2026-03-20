@@ -302,7 +302,7 @@ Instead, a Lambda function issues dev certificates from the dev subordinate CA a
 ./scripts/fetch-dev-cert.sh greeting-service
 ```
 
-This creates `.certs/greeting-service/tls.crt`, `tls.key`, and `ca.crt`. The cert has the same SAN as the in-cluster service (`greeting-service.greeting-service-ns.svc.cluster.local`) and is valid for 30 days. Since it chains to the same root CA, in-cluster services trust it automatically. The Lambda skips issuance if a valid cert already exists.
+This creates `.certs/greeting-service/tls.crt`, `tls.key`, and `ca.crt`. The cert has the same SAN as the in-cluster service (`greeting-service.greeting-service-ns.svc.cluster.local`) and is valid for 7 days. Since it chains to the same root CA, in-cluster services trust it automatically. The Lambda skips issuance if a valid cert already exists.
 
 Developers need `secretsmanager:GetSecretValue` permission. Only the Lambda needs PCA issuance permissions.
 
@@ -405,7 +405,7 @@ All traffic to `greeting-service` in the cluster routes to your local machine.
 **Important considerations:**
 
 - **Certificate SANs**: The locally-issued certificates have the same SANs as in-cluster certs (`<service>.<namespace>.svc.cluster.local`). Telepresence routes DNS correctly, so hostname verification works.
-- **Certificate validity**: Dev certs are valid for 30 days (vs 24h for pod certs). The Lambda skips re-issuance if a valid cert exists; use `--force` with `request-dev-cert.sh` to re-issue.
+- **Certificate validity**: Dev certs are valid for 7 days (same as pod certs). The Lambda skips re-issuance if a valid cert exists; use `--force` with `request-dev-cert.sh` to re-issue.
 - **Health checks**: The ALB health checks go to port 8080 (HTTP). Make sure your local service also exposes the actuator on 8080, or the ALB will mark the target unhealthy.
 - **Header-based intercepts don't work with app-managed TLS**: The traffic agent operates at L7 (HTTP) for header-based intercepts but at L4 (TCP) for global intercepts. With header-based routing (`--http-header`), the agent needs to read HTTP headers to decide where to route traffic. But traffic arriving on port 8443 is TLS-encrypted - the agent sees a TLS ClientHello, not an HTTP request. It can't parse headers from encrypted bytes, so the TLS handshake fails. This breaks ALL traffic on the intercepted port (not just requests with the header) because the agent has replaced the app as the listener on 8443. Only global intercepts work with app-managed TLS - they proxy raw TCP bytes without inspecting traffic, so TLS passes through opaquely. Header-based intercepts work fine with Istio Ambient because ztunnel handles mTLS at the node level and delivers decrypted plain HTTP to the pod - the traffic agent can read headers and route accordingly.
 **Disconnect when done:**

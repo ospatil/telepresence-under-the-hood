@@ -314,7 +314,7 @@ A **Lambda** issues dev certs from the dev subordinate CA and stores them in Sec
 ./scripts/run-local.sh greeting-service
 ```
 
-- Dev certs valid for **30 days** - Lambda skips if valid cert exists
+- Dev certs valid for **7 days** - Lambda skips if valid cert exists
 - Developers only need `secretsmanager:GetSecretValue` - no PCA access
 - Private keys generated **inside Lambda**, stored in Secrets Manager
 

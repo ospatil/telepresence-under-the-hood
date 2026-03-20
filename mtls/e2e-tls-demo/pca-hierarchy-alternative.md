@@ -38,5 +38,8 @@ AWS PCA Root CA (e2e-tls-demo-root-ca)
 
 ## Cost
 
-- 3 PCAs at ~$400/month each = ~$1,200/month
-- Per-cert cost: ~$0.75 each (general purpose mode)
+- Root CA: general purpose (~$400/month) - required for signing subordinate CA certs (multi-year validity)
+- Cluster CA: short-lived mode (~$50/month) - pod certs are 24h, well within 7-day limit
+- Dev CA: short-lived mode (~$50/month) - dev certs are 7 days
+- Total: ~$500/month (vs ~$1,200/month with all general purpose)
+- Per-cert cost: ~$0.058 each (short-lived) vs ~$0.75 (general purpose)
