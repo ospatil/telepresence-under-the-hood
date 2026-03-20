@@ -5,15 +5,28 @@ End-to-end TLS encryption from ALB to Spring Boot pods using AWS Private CA, cer
 ## Architecture
 
 ```
-┌──────────┐    ┌─────────┐    ┌─────────────────┐    ┌──────────────────┐    ┌───────────────────┐
-│ Internet │───▶│ Route53 │───▶│ ALB (ACM cert)  │───▶│ greeting-service │───▶│  quote-service    │
-└──────────┘    └─────────┘    │ Public TLS :443 │    │ PCA cert :8443   │    │  PCA cert :8443   │
-                               └─────────────────┘    └──────────────────┘    └───────────────────┘
-                                      │                       │                        │
-                                      │                       │                        │
-                               Terminates public       Terminates TLS          Terminates TLS
-                               TLS, re-encrypts        from ALB                from greeting-svc
-                               to pods (HTTPS)
+   Client (browser/curl)
+            |
+            |  HTTPS :443 (ACM public cert)
+            v
+  +---------------------+
+  |         ALB         |  Terminates public TLS,
+  |  (internet-facing)  |  re-encrypts to pod,
+  +---------------------+  Provisioned by AWS LB Controller
+            |
+            |  HTTPS :8443 (PCA cert, backend-protocol: HTTPS, target-type: ip)
+            v
+  +---------------------+
+  |  greeting-service   |  App terminates TLS,
+  |    (Spring Boot)    |  calls quote-service over HTTPS
+  +---------------------+
+            |
+            |  HTTPS :8443 (PCA cert, mutual CA trust)
+            v
+  +---------------------+
+  |    quote-service    |  App terminates TLS
+  |    (Spring Boot)    |
+  +---------------------+
 ```
 
 ### Traffic Flow
@@ -49,6 +62,12 @@ Each service pod receives:
 - `ca.crt` - root CA certificate (for trusting all certs in the hierarchy)
 
 ### Components
+
+Three Kubernetes extension points work together to deliver certificates to pods:
+
+- **cert-manager** - a Kubernetes operator (CRDs + controllers) that orchestrates certificate lifecycle: CSR creation, CA submission, renewal
+- **aws-privateca-issuer** - a cert-manager external issuer plugin. cert-manager has a plugin interface for third-party CA backends; this one calls the AWS PCA `IssueCertificate` API. Similar plugins exist for Vault, Venafi, Google CAS, etc.
+- **cert-manager CSI driver** - a Kubernetes CSI (Container Storage Interface) driver. CSI is the standard storage plugin interface (same as EBS, EFS). Instead of mounting a disk, this driver generates a private key + CSR on the node, submits it to cert-manager, and writes the signed cert to a tmpfs volume inside the pod. The private key never leaves the node.
 
 | Component | Purpose |
 |-----------|---------|

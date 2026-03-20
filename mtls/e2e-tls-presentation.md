@@ -63,7 +63,7 @@ style: |
             v
   +---------------------+
   |         ALB         |  Terminates public TLS,
-  |  (internet-facing)  |  re-encrypts to pod
+  |  (internet-facing)  |  re-encrypts to pod,
   +---------------------+  Provisioned by AWS LB Controller
             |
             |  HTTPS :8443 (PCA cert, backend-protocol: HTTPS, target-type: ip)
@@ -109,6 +109,25 @@ DNS via Route53 resolves `greeting.<domain>` to the ALB.
 - **Dev CA** - Lambda issues developer certs, stored in Secrets Manager
 - All certs chain to the same root --> **mutual trust is automatic**
 - Subordinates use `PathLen0` - cannot create further sub-CAs
+
+---
+
+## The Three Components
+
+Three Kubernetes extension points work together:
+
+- **cert-manager** - Kubernetes operator (CRDs + controllers) that orchestrates certificate lifecycle: CSR creation, CA submission, renewal
+- **aws-privateca-issuer** - cert-manager external issuer plugin that calls the AWS PCA API. cert-manager has a plugin interface for third-party CA backends (Vault, Venafi, Google CAS, etc.)
+- **cert-manager CSI driver** - Kubernetes CSI (Container Storage Interface) driver. Same plugin interface as EBS/EFS, but instead of mounting a disk, it generates a private key on the node, gets it signed via cert-manager, and writes the cert to a tmpfs volume inside the pod
+
+```
+Pod starts --> CSI driver (on node) --> cert-manager --> aws-pca-issuer --> AWS PCA API
+                  |                                                            |
+                  |<-------------- signed cert + chain <-----------------------|
+                  |
+                  v
+            tmpfs volume (key + cert, RAM only)
+```
 
 ---
 
