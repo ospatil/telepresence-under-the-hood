@@ -23,19 +23,19 @@ With Telepresence intercept (PERMISSIVE mode):
   (no sidecar)            (in-cluster)            (sidecar)
 ```
 
-Linkerd defaults to PERMISSIVE mTLS — it accepts both mTLS and plain HTTP. When Telepresence intercepts a pod, the intercepted traffic arrives as plain HTTP, and Linkerd handles it gracefully.
+Linkerd defaults to PERMISSIVE mTLS - it accepts both mTLS and plain HTTP. When Telepresence intercepts a pod, the intercepted traffic arrives as plain HTTP, and Linkerd handles it gracefully.
 
 ## Phase 1: Certificate Infrastructure
 
 Linkerd requires a three-level certificate hierarchy:
 
 ```
-Trust Anchor (Root CA) — 10 years, cert-manager managed
-  └── Identity Issuer (Intermediate CA) — 1 year, cert-manager auto-rotates
-        └── Workload Certificates — 24h, Linkerd auto-manages
+Trust Anchor (Root CA) - 10 years, cert-manager managed
+  └── Identity Issuer (Intermediate CA) - 1 year, cert-manager auto-rotates
+        └── Workload Certificates - 24h, Linkerd auto-manages
 ```
 
-We use cert-manager (already installed) to manage the trust anchor and identity issuer entirely in-cluster — no local cert generation needed.
+We use cert-manager (already installed) to manage the trust anchor and identity issuer entirely in-cluster - no local cert generation needed.
 
 ### 1.1 Create cert-manager resources for Linkerd
 
@@ -50,7 +50,7 @@ metadata:
 spec:
   selfSigned: {}
 ---
-# Trust Anchor (Root CA) — 10 years
+# Trust Anchor (Root CA) - 10 years
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -79,7 +79,7 @@ spec:
   ca:
     secretName: linkerd-trust-anchor
 ---
-# Identity Issuer (Intermediate CA) — 1 year, auto-rotated
+# Identity Issuer (Intermediate CA) - 1 year, auto-rotated
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -131,7 +131,7 @@ kubectl get secret linkerd-trust-anchor -n linkerd \
 
 For production, replace the self-signed bootstrap with [aws-privateca-issuer](https://github.com/cert-manager/aws-privateca-issuer) backed by AWS Private CA. This gives you HSM-backed key storage, audit logging, and managed CA infrastructure.
 
-**Important**: AWS PCA's `BlankEndEntityCertificate_APICSRPassthrough/V1` template (used for CA certs) sets `pathlen:0`. This means the original 3-level chain (PCA → trust anchor → identity issuer → workload certs) won't work — the trust anchor can't issue sub-CAs. The solution is to use PCA directly as the trust anchor, simplifying to a 2-level chain:
+**Important**: AWS PCA's `BlankEndEntityCertificate_APICSRPassthrough/V1` template (used for CA certs) sets `pathlen:0`. This means the original 3-level chain (PCA → trust anchor → identity issuer → workload certs) won't work - the trust anchor can't issue sub-CAs. The solution is to use PCA directly as the trust anchor, simplifying to a 2-level chain:
 
 ```
 Self-signed (this demo):
@@ -331,7 +331,7 @@ External (from service-a pod) ──[mTLS encrypted]──▶ linkerd-proxy
 kubectl debug -it <service-b-pod> -n service-b-ns --image=nicolaka/netshoot -- tcpdump -i any -A 'not host 127.0.0.1' -c 50
 ```
 
-This filters out localhost and shows only inter-pod traffic. You'll see encrypted binary gibberish — no readable HTTP text.
+This filters out localhost and shows only inter-pod traffic. You'll see encrypted binary gibberish - no readable HTTP text.
 
 **Capture localhost traffic (decrypted):**
 
@@ -395,14 +395,14 @@ telepresence leave service-a-deployment
 telepresence intercept service-a-deployment --port 8080:8080 --http-header x-dev=local
 ```
 
-Test with header — hits local:
+Test with header - hits local:
 
 ```bash
 curl -H "x-dev: local" http://service-a.service-a-ns:8080
 # Response: {"message":"Hello from service-b! and Hello from local service-a!"}
 ```
 
-Test without header — hits in-cluster (through mTLS mesh):
+Test without header - hits in-cluster (through mTLS mesh):
 
 ```bash
 curl http://service-a.service-a-ns:8080
@@ -418,13 +418,13 @@ telepresence quit -s
 
 ## Design Decisions
 
-1. **cert-manager in-cluster CA** — cert-manager is already installed. Using the self-signed bootstrap approach avoids local cert generation and is fully automated. For production, swap to AWS Private CA using `aws-privateca-issuer` — see [Production Alternative: AWS Private CA](#production-alternative-aws-private-ca). Note: AWS PCA requires `GENERAL_PURPOSE` mode (~$400/month) for Linkerd since the identity issuer is a long-lived CA cert. The chain is also simplified to 2 levels (PCA as trust anchor) due to PCA's `pathlen:0` constraint on issued CA certs.
+1. **cert-manager in-cluster CA** - cert-manager is already installed. Using the self-signed bootstrap approach avoids local cert generation and is fully automated. For production, swap to AWS Private CA using `aws-privateca-issuer` - see [Production Alternative: AWS Private CA](#production-alternative-aws-private-ca). Note: AWS PCA requires `GENERAL_PURPOSE` mode (~$400/month) for Linkerd since the identity issuer is a long-lived CA cert. The chain is also simplified to 2 levels (PCA as trust anchor) due to PCA's `pathlen:0` constraint on issued CA certs.
 
-2. **Linkerd edge releases** — Since February 2024, the Linkerd open source project only produces edge releases. Stable releases (e.g., 2.19) are announced as version milestones but the actual artifacts are edge releases (e.g., `edge-25.10.7`). Vendor-provided stable releases (with semantic versioning and backported fixes) are available through Buoyant Enterprise. For this demo, edge releases are the standard OSS path.
+2. **Linkerd edge releases** - Since February 2024, the Linkerd open source project only produces edge releases. Stable releases (e.g., 2.19) are announced as version milestones but the actual artifacts are edge releases (e.g., `edge-25.10.7`). Vendor-provided stable releases (with semantic versioning and backported fixes) are available through Buoyant Enterprise. For this demo, edge releases are the standard OSS path.
 
-3. **PERMISSIVE mTLS** — Linkerd's default mode. It accepts both mTLS (from meshed pods) and plain HTTP (from unmeshed sources like Telepresence). This is the recommended approach for dev environments per both Linkerd and Telepresence documentation. In production, use STRICT mode and separate dev/prod namespaces.
+3. **PERMISSIVE mTLS** - Linkerd's default mode. It accepts both mTLS (from meshed pods) and plain HTTP (from unmeshed sources like Telepresence). This is the recommended approach for dev environments per both Linkerd and Telepresence documentation. In production, use STRICT mode and separate dev/prod namespaces.
 
-4. **Namespace-level injection** — Annotating the namespace rather than individual deployments. Simpler and ensures any new deployments in the namespace are automatically meshed.
+4. **Namespace-level injection** - Annotating the namespace rather than individual deployments. Simpler and ensures any new deployments in the namespace are automatically meshed.
 
 ## Uninstalling Linkerd
 

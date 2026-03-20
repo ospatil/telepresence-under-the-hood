@@ -1,4 +1,4 @@
-# Bespoke Sidecar mTLS — Lightweight Alternative to Service Meshes
+# Bespoke Sidecar mTLS - Lightweight Alternative to Service Meshes
 
 Instead of adopting a full service mesh (Istio, Linkerd), you can build a lightweight mTLS sidecar using a standard reverse proxy. This gives you east-west (service-to-service) and north-south (ingress-to-pod) encryption with minimal overhead and full control.
 
@@ -29,7 +29,7 @@ The main challenge with bespoke sidecars is managing short-lived certificate iss
 
 ### 1. cert-manager CSI Driver (recommended)
 
-[cert-manager csi-driver](https://cert-manager.io/docs/usage/csi-driver/) mounts short-lived certs directly into pods as ephemeral volumes. No init container, no renewal agent — cert-manager handles issuance and renewal transparently.
+[cert-manager csi-driver](https://cert-manager.io/docs/usage/csi-driver/) mounts short-lived certs directly into pods as ephemeral volumes. No init container, no renewal agent - cert-manager handles issuance and renewal transparently.
 
 ```yaml
 volumes:
@@ -63,7 +63,7 @@ The sidecar proxy reads certs from the mounted path. Works with any cert-manager
 
 ### 3. Init Container + Renewal Sidecar
 
-DIY approach — an init container fetches the initial cert, and a lightweight sidecar handles renewal:
+DIY approach - an init container fetches the initial cert, and a lightweight sidecar handles renewal:
 
 - Init container calls cert-manager API (or AWS PCA directly), writes cert to shared `emptyDir` volume
 - Renewal sidecar watches cert expiry and re-fetches before expiration
@@ -105,22 +105,22 @@ One consistent TLS layer for all traffic paths, managed by the same cert pipelin
 ### Sidecar Injection
 
 Service meshes inject sidecars automatically via mutating webhooks. For bespoke sidecars:
-- **Manual**: add the sidecar container to every deployment YAML — simple but doesn't scale
+- **Manual**: add the sidecar container to every deployment YAML - simple but doesn't scale
 - **Kyverno mutating policy**: auto-inject the sidecar + volume mounts on pod creation (see [Telepresence and Kyverno](../policy/telepresence-with-kyverno.md)). More maintainable than a custom webhook
 - **Custom mutating admission webhook**: most flexible but more code to maintain
 
 ### Certificate Reload Without Downtime
 
 When certs rotate on disk, the proxy needs to pick them up:
-- **nginx**: doesn't watch files — needs an explicit `nginx -s reload`. Requires a small process (`inotifywait` loop or cron) to trigger it
+- **nginx**: doesn't watch files - needs an explicit `nginx -s reload`. Requires a small process (`inotifywait` loop or cron) to trigger it
 - **HAProxy**: `master-worker` mode handles this more gracefully
 - **Envoy**: native SDS, no file watching needed
 
 ### mTLS Policy Enforcement and Telepresence Compatibility
 
 Service meshes let you declaratively set STRICT vs PERMISSIVE mTLS per namespace/service. With bespoke nginx, you configure `ssl_verify_client` per sidecar:
-- `on` (strict): demands a client cert — **Telepresence intercepts will be rejected** since the local machine doesn't present a client cert
-- `optional` (permissive): accepts both mTLS and plain HTTP — **Telepresence works**, same as Istio/Linkerd in PERMISSIVE mode
+- `on` (strict): demands a client cert - **Telepresence intercepts will be rejected** since the local machine doesn't present a client cert
+- `optional` (permissive): accepts both mTLS and plain HTTP - **Telepresence works**, same as Istio/Linkerd in PERMISSIVE mode
 
 With a service mesh, switching modes is a one-line policy change. With bespoke nginx, you need to:
 1. Change `ssl_verify_client` from `on` to `optional`
@@ -131,7 +131,7 @@ For practical use, automate this with an env-based toggle and Kyverno mutation:
 
 **Namespace label** signals the mode:
 ```bash
-kubectl label ns service-a-ns mtls-mode=permissive   # dev — Telepresence works
+kubectl label ns service-a-ns mtls-mode=permissive   # dev - Telepresence works
 kubectl label ns service-a-ns mtls-mode=strict        # prod
 ```
 
@@ -210,7 +210,7 @@ Service meshes provide golden metrics (latency, error rate, throughput) and topo
 
 Service meshes tie certs to workload identity (SPIFFE IDs) and support authorization policies ("service-a can call service-b but not service-c"). With bespoke nginx:
 - mTLS authenticates the connection but doesn't provide fine-grained authorization
-- You'd need to inspect client cert CN/SAN in nginx config with `map`/`if` blocks per service — brittle at scale
+- You'd need to inspect client cert CN/SAN in nginx config with `map`/`if` blocks per service - brittle at scale
 
 ### Upgrade and Patching
 
@@ -230,7 +230,7 @@ When a proxy CVE drops:
 | Authorization | Identity-based policies | Manual cert CN/SAN inspection |
 | Patching | Control plane update rolls sidecars | Manual image update + rollout |
 
-None of these are blockers — they're operational costs you accept in exchange for simplicity and smaller footprint. The inflection point is when you find yourself building automation for injection, reload, policy, and observability — at that point you've effectively built a service mesh and should just adopt one.
+None of these are blockers - they're operational costs you accept in exchange for simplicity and smaller footprint. The inflection point is when you find yourself building automation for injection, reload, policy, and observability - at that point you've effectively built a service mesh and should just adopt one.
 
 ## Recommendation
 

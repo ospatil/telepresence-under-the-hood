@@ -7,12 +7,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Load .env file if it exists
-if [[ -f "$SCRIPT_DIR/.env" ]]; then
+if [[ -f "$PROJECT_DIR/.env" ]]; then
   echo "Loading configuration from .env file..."
   set -a
-  source "$SCRIPT_DIR/.env"
+  source "$PROJECT_DIR/.env"
   set +a
 fi
 
@@ -59,29 +60,87 @@ CLUSTER_NAME="auto-mode-private-access"
 ROLE_PREFIX="e2e-tls-demo"
 CERT_MANAGER_NS="cert-manager"
 
-# ── Phase 1: AWS Private CA ──────────────────────────────────────────────────
+# ── Phase 1: AWS Private CA Hierarchy ─────────────────────────────────────────
 
-echo "=== Phase 1: AWS Private CA ==="
+echo "=== Phase 1: AWS Private CA Hierarchy ==="
 
-export CA_ARN=$(aws acm-pca create-certificate-authority \
+# Helper: create and activate a subordinate CA signed by the root
+create_subordinate_ca() {
+  local cn=$1
+  local root_arn=$2
+
+  local sub_arn
+  sub_arn=$(aws acm-pca create-certificate-authority \
+    --certificate-authority-configuration \
+      "KeyAlgorithm=EC_prime256v1,SigningAlgorithm=SHA256WITHECDSA,Subject={CommonName=${cn}}" \
+    --certificate-authority-type SUBORDINATE \
+    --usage-mode GENERAL_PURPOSE \
+    --region "$AWS_REGION" \
+    --query 'CertificateAuthorityArn' --output text)
+
+  aws acm-pca wait certificate-authority-csr-created \
+    --certificate-authority-arn "$sub_arn" --region "$AWS_REGION"
+
+  aws acm-pca get-certificate-authority-csr \
+    --certificate-authority-arn "$sub_arn" --region "$AWS_REGION" \
+    --output text > /tmp/e2e-sub-ca.csr
+
+  local sub_cert_arn
+  sub_cert_arn=$(aws acm-pca issue-certificate \
+    --certificate-authority-arn "$root_arn" \
+    --csr fileb:///tmp/e2e-sub-ca.csr \
+    --signing-algorithm SHA256WITHECDSA \
+    --template-arn arn:aws:acm-pca:::template/SubordinateCACertificate_PathLen0/V1 \
+    --validity Value=5,Type=YEARS \
+    --region "$AWS_REGION" \
+    --query 'CertificateArn' --output text)
+
+  aws acm-pca wait certificate-issued \
+    --certificate-authority-arn "$root_arn" \
+    --certificate-arn "$sub_cert_arn" \
+    --region "$AWS_REGION"
+
+  aws acm-pca get-certificate \
+    --certificate-authority-arn "$root_arn" \
+    --certificate-arn "$sub_cert_arn" \
+    --region "$AWS_REGION" \
+    --query 'Certificate' --output text > /tmp/e2e-sub-cert.pem
+
+  aws acm-pca get-certificate-authority-certificate \
+    --certificate-authority-arn "$root_arn" \
+    --region "$AWS_REGION" \
+    --query 'Certificate' --output text > /tmp/e2e-root-cert-chain.pem
+
+  aws acm-pca import-certificate-authority-certificate \
+    --certificate-authority-arn "$sub_arn" \
+    --certificate fileb:///tmp/e2e-sub-cert.pem \
+    --certificate-chain fileb:///tmp/e2e-root-cert-chain.pem \
+    --region "$AWS_REGION"
+
+  echo "$sub_arn"
+}
+
+# 1a. Create and activate root CA
+echo "Creating root CA..."
+export ROOT_CA_ARN=$(aws acm-pca create-certificate-authority \
   --certificate-authority-configuration \
-    "KeyAlgorithm=EC_prime256v1,SigningAlgorithm=SHA256WITHECDSA,Subject={CommonName=e2e-tls-demo-ca}" \
+    "KeyAlgorithm=EC_prime256v1,SigningAlgorithm=SHA256WITHECDSA,Subject={CommonName=e2e-tls-demo-root-ca}" \
   --certificate-authority-type ROOT \
   --usage-mode GENERAL_PURPOSE \
   --region "$AWS_REGION" \
   --query 'CertificateAuthorityArn' --output text)
-echo "CA ARN: $CA_ARN"
+echo "Root CA ARN: $ROOT_CA_ARN"
 
-echo "Waiting for CA..."
+echo "Waiting for root CA..."
 aws acm-pca wait certificate-authority-csr-created \
-  --certificate-authority-arn "$CA_ARN" --region "$AWS_REGION"
+  --certificate-authority-arn "$ROOT_CA_ARN" --region "$AWS_REGION"
 
 aws acm-pca get-certificate-authority-csr \
-  --certificate-authority-arn "$CA_ARN" --region "$AWS_REGION" \
+  --certificate-authority-arn "$ROOT_CA_ARN" --region "$AWS_REGION" \
   --output text > /tmp/e2e-ca.csr
 
 ROOT_CERT_ARN=$(aws acm-pca issue-certificate \
-  --certificate-authority-arn "$CA_ARN" \
+  --certificate-authority-arn "$ROOT_CA_ARN" \
   --csr fileb:///tmp/e2e-ca.csr \
   --signing-algorithm SHA256WITHECDSA \
   --template-arn arn:aws:acm-pca:::template/RootCACertificate/V1 \
@@ -90,32 +149,53 @@ ROOT_CERT_ARN=$(aws acm-pca issue-certificate \
   --query 'CertificateArn' --output text)
 
 aws acm-pca wait certificate-issued \
-  --certificate-authority-arn "$CA_ARN" \
+  --certificate-authority-arn "$ROOT_CA_ARN" \
   --certificate-arn "$ROOT_CERT_ARN" \
   --region "$AWS_REGION"
 
 aws acm-pca get-certificate \
-  --certificate-authority-arn "$CA_ARN" \
+  --certificate-authority-arn "$ROOT_CA_ARN" \
   --certificate-arn "$ROOT_CERT_ARN" \
   --region "$AWS_REGION" \
   --query 'Certificate' --output text > /tmp/e2e-root-cert.pem
 
 aws acm-pca import-certificate-authority-certificate \
-  --certificate-authority-arn "$CA_ARN" \
+  --certificate-authority-arn "$ROOT_CA_ARN" \
   --certificate fileb:///tmp/e2e-root-cert.pem \
   --region "$AWS_REGION"
 
-echo "CA activated."
+echo "Root CA activated."
 
-# IAM for PCA issuer
+# 1b. Create cluster subordinate CA
+echo "Creating cluster subordinate CA..."
+export CLUSTER_CA_ARN=$(create_subordinate_ca "e2e-tls-demo-cluster-ca" "$ROOT_CA_ARN")
+echo "Cluster CA ARN: $CLUSTER_CA_ARN"
+
+# 1c. Create developer subordinate CA
+echo "Creating developer subordinate CA..."
+export DEV_CA_ARN=$(create_subordinate_ca "e2e-tls-demo-dev-ca" "$ROOT_CA_ARN")
+echo "Dev CA ARN: $DEV_CA_ARN"
+
+# Save ARNs to .env
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+  for var in ROOT_CA_ARN CLUSTER_CA_ARN DEV_CA_ARN; do
+    if grep -q "^${var}=" "$PROJECT_DIR/.env"; then
+      sed -i '' "s|^${var}=.*|${var}=${!var}|" "$PROJECT_DIR/.env"
+    else
+      echo "${var}=${!var}" >> "$PROJECT_DIR/.env"
+    fi
+  done
+fi
+
+# IAM for PCA issuer (cert-manager needs access to cluster CA)
 PCA_POLICY_ARN=$(aws iam create-policy \
   --policy-name "${ROLE_PREFIX}-pca-policy" \
   --policy-document "{
     \"Version\": \"2012-10-17\",
     \"Statement\": [{
       \"Effect\": \"Allow\",
-      \"Action\": [\"acm-pca:IssueCertificate\",\"acm-pca:GetCertificate\",\"acm-pca:DescribeCertificateAuthority\"],
-      \"Resource\": \"${CA_ARN}\"
+      \"Action\": [\"acm-pca:IssueCertificate\",\"acm-pca:GetCertificate\",\"acm-pca:DescribeCertificateAuthority\",\"acm-pca:GetCertificateAuthorityCertificate\"],
+      \"Resource\": \"${CLUSTER_CA_ARN}\"
     }]
   }" --query 'Policy.Arn' --output text)
 
@@ -124,6 +204,60 @@ aws iam create-role --role-name "${ROLE_PREFIX}-pca-role" \
     "Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"pods.eks.amazonaws.com"},"Action":["sts:AssumeRole","sts:TagSession"]}]
   }' > /dev/null
 aws iam attach-role-policy --role-name "${ROLE_PREFIX}-pca-role" --policy-arn "$PCA_POLICY_ARN"
+
+# ── Phase 1b: Lambda for dev cert issuance ────────────────────────────────────
+
+echo "=== Phase 1b: Dev cert Lambda ==="
+
+LAMBDA_NAME="e2e-tls-demo-issue-dev-cert"
+
+# IAM role for Lambda
+LAMBDA_POLICY_ARN=$(aws iam create-policy \
+  --policy-name "${ROLE_PREFIX}-lambda-policy" \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [
+      {
+        \"Effect\": \"Allow\",
+        \"Action\": [\"acm-pca:IssueCertificate\",\"acm-pca:GetCertificate\",\"acm-pca:GetCertificateAuthorityCertificate\"],
+        \"Resource\": [\"${DEV_CA_ARN}\",\"${ROOT_CA_ARN}\"]
+      },
+      {
+        \"Effect\": \"Allow\",
+        \"Action\": [\"secretsmanager:GetSecretValue\",\"secretsmanager:PutSecretValue\",\"secretsmanager:CreateSecret\"],
+        \"Resource\": \"arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:e2e-tls-demo/dev-certs/*\"
+      },
+      {
+        \"Effect\": \"Allow\",
+        \"Action\": [\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],
+        \"Resource\": \"*\"
+      }
+    ]
+  }" --query 'Policy.Arn' --output text)
+
+aws iam create-role --role-name "${ROLE_PREFIX}-lambda-role" \
+  --assume-role-policy-document '{
+    "Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]
+  }' > /dev/null
+aws iam attach-role-policy --role-name "${ROLE_PREFIX}-lambda-role" --policy-arn "$LAMBDA_POLICY_ARN"
+
+echo "Waiting for IAM role propagation..."
+sleep 10
+
+# Package and deploy Lambda
+(cd "$PROJECT_DIR/lambda" && pip install cryptography cffi --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 --only-binary=:all: -t . -q && zip -q -r /tmp/e2e-tls-lambda.zip .)
+
+aws lambda create-function \
+  --function-name "$LAMBDA_NAME" \
+  --runtime python3.12 \
+  --handler issue_dev_cert.handler \
+  --role "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ROLE_PREFIX}-lambda-role" \
+  --zip-file fileb:///tmp/e2e-tls-lambda.zip \
+  --timeout 30 \
+  --environment "Variables={DEV_CA_ARN=${DEV_CA_ARN},ROOT_CA_ARN=${ROOT_CA_ARN},VALIDITY_DAYS=30}" \
+  --region "$AWS_REGION" > /dev/null
+
+echo "Lambda deployed: $LAMBDA_NAME"
 
 # ── Phase 2: cert-manager + AWS PCA Issuer ───────────────────────────────────
 
@@ -164,7 +298,7 @@ kind: AWSPCAClusterIssuer
 metadata:
   name: aws-pca-issuer
 spec:
-  arn: ${CA_ARN}
+  arn: ${CLUSTER_CA_ARN}
   region: ${AWS_REGION}
 EOF
 
@@ -250,6 +384,15 @@ echo "Waiting for ACM certificate validation (this may take a few minutes)..."
 aws acm wait certificate-validated --certificate-arn "$ACM_CERT_ARN" --region "$AWS_REGION"
 echo "ACM certificate validated."
 
+# Save ACM_CERT_ARN to .env
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+  if grep -q '^ACM_CERT_ARN=' "$PROJECT_DIR/.env"; then
+    sed -i '' "s|^ACM_CERT_ARN=.*|ACM_CERT_ARN=${ACM_CERT_ARN}|" "$PROJECT_DIR/.env"
+  else
+    echo "ACM_CERT_ARN=${ACM_CERT_ARN}" >> "$PROJECT_DIR/.env"
+  fi
+fi
+
 # ── Phase 5: Build & Push Docker Images ──────────────────────────────────────
 
 echo "=== Phase 5: Build & Push ==="
@@ -262,8 +405,8 @@ for svc in quote-service greeting-service; do
     aws ecr create-repository --repository-name "$svc" --region "$AWS_REGION" > /dev/null
 
   echo "Building $svc..."
-  (cd "$SCRIPT_DIR/$svc" && ./mvnw -q clean package -DskipTests)
-  docker build --platform linux/amd64 -t "$ECR_REGISTRY/$svc:latest" "$SCRIPT_DIR/$svc"
+  (cd "$PROJECT_DIR/$svc" && ./mvnw -q clean package -DskipTests)
+  docker build --platform linux/amd64 -t "$ECR_REGISTRY/$svc:latest" "$PROJECT_DIR/$svc"
   docker push "$ECR_REGISTRY/$svc:latest"
 done
 
@@ -276,14 +419,14 @@ kubectl create ns quote-service-ns --dry-run=client -o yaml | kubectl apply -f -
 
 # Deployments (substitute env vars) - CSI driver provisions certs automatically
 for svc in quote-service greeting-service; do
-  envsubst < "$SCRIPT_DIR/$svc/k8s/deployment.yaml" | kubectl apply -f -
+  envsubst < "$PROJECT_DIR/$svc/k8s/deployment.yaml" | kubectl apply -f -
 done
 
 kubectl wait --for=condition=Ready pod -l app=quote-service -n quote-service-ns --timeout=120s
 kubectl wait --for=condition=Ready pod -l app=greeting-service -n greeting-service-ns --timeout=120s
 
 # Ingress
-envsubst < "$SCRIPT_DIR/greeting-service/k8s/ingress.yaml" | kubectl apply -f -
+envsubst < "$PROJECT_DIR/greeting-service/k8s/ingress.yaml" | kubectl apply -f -
 
 # ── Phase 7: Validate ────────────────────────────────────────────────────────
 
@@ -314,9 +457,11 @@ curl -s "https://greeting.${DOMAIN}/greeting" | jq . || echo "Endpoint not ready
 
 echo ""
 echo "=== Setup Complete ==="
-echo "CA ARN:       $CA_ARN"
-echo "ACM Cert ARN: $ACM_CERT_ARN"
-echo "Endpoint:     https://greeting.${DOMAIN}/greeting"
+echo "Root CA ARN:    $ROOT_CA_ARN"
+echo "Cluster CA ARN: $CLUSTER_CA_ARN"
+echo "Dev CA ARN:     $DEV_CA_ARN"
+echo "ACM Cert ARN:   $ACM_CERT_ARN"
+echo "Endpoint:       https://greeting.${DOMAIN}/greeting"
 echo ""
 echo "Note: Certificates are provisioned via CSI driver directly into pods."
 echo "No Kubernetes Secrets are created - certs exist only in pod filesystem."

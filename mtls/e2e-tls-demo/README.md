@@ -33,32 +33,37 @@ ALB health checks use a separate HTTP port (8080) to avoid certificate validatio
 ### Certificate Chain
 
 ```
-AWS Private CA (root, general purpose mode)
+AWS Private CA Root (e2e-tls-demo-root-ca)
   │
-  ├── greeting-service-tls
-  │     ├── tls.crt  (service certificate)
-  │     ├── tls.key  (private key)
-  │     └── ca.crt   (CA public certificate)
+  ├── Subordinate CA: e2e-tls-demo-cluster-ca
+  │     ├── greeting-service cert (via cert-manager CSI driver)
+  │     └── quote-service cert (via cert-manager CSI driver)
   │
-  └── quote-service-tls
-        ├── tls.crt
-        ├── tls.key
-        └── ca.crt
+  └── Subordinate CA: e2e-tls-demo-dev-ca
+        └── developer local certs (via Lambda + Secrets Manager)
 ```
+
+Each service pod receives:
+- `tls.crt` - service certificate (issued by cluster CA)
+- `tls.key` - private key (generated in-memory on the node)
+- `ca.crt` - root CA certificate (for trusting all certs in the hierarchy)
 
 ### Components
 
 | Component | Purpose |
 |-----------|---------|
-| AWS Private CA | Root CA that issues certificates (general purpose mode for certs > 7 days) |
+| AWS Private CA (root) | Root of trust - signs subordinate CAs, never issues leaf certs directly |
+| AWS Private CA (cluster subordinate) | Issues service certificates via cert-manager CSI driver |
+| AWS Private CA (dev subordinate) | Issues developer local certificates via Lambda |
 | cert-manager | Kubernetes-native certificate lifecycle management |
 | cert-manager CSI driver | Mounts certificates directly into pods via CSI volume (no Secrets) |
 | aws-privateca-issuer | cert-manager plugin that bridges to AWS PCA (uses Pod Identity for auth) |
-| AWSPCAClusterIssuer | Cluster-wide issuer CR that connects cert-manager to your PCA |
+| AWSPCAClusterIssuer | Cluster-wide issuer CR that connects cert-manager to the cluster subordinate CA |
+| Lambda (issue-dev-cert) | Issues dev certs from the dev CA and stores them in Secrets Manager |
 
 ### How cert-manager CSI Driver Works with AWS PCA
 
-The CSI driver provisions certificates directly into pod filesystems — no Kubernetes Secrets involved:
+The CSI driver provisions certificates directly into pod filesystems - no Kubernetes Secrets involved:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -89,11 +94,20 @@ The CSI driver provisions certificates directly into pod filesystems — no Kube
 6. Certificate is written directly to pod filesystem at mount path
 7. CSI driver handles renewal automatically before expiry
 
+**Security properties:**
+
+- **In-memory only (tmpfs)**: The CSI driver creates a tmpfs volume - certificates and private keys are stored in memory, never written to disk on the node
+- **Private key never leaves the node**: Keys are generated locally on the node by the CSI driver and never transmitted over the network
+- **Ephemeral lifecycle**: Volume is created at pod startup and destroyed at pod termination - no key material persists after the pod is gone
+- **No Kubernetes Secrets**: Nothing is stored in etcd - eliminates an entire class of secret-sprawl risks
+
 **Benefits over Secret-based approach:**
 
 | Aspect | CSI Driver | Certificate CR + Secret |
 |--------|-----------|------------------------|
 | Secrets in etcd | ❌ None | ✅ Stored in etcd |
+| Key storage | ✅ In-memory (tmpfs) | ❌ On disk (etcd + node) |
+| Key leaves node | ❌ Never | ✅ Via API server |
 | Per-pod unique certs | ✅ Each pod gets its own | ❌ Shared Secret |
 | Certificate lifecycle | ✅ Tied to pod | ❌ Independent of pod |
 | Setup complexity | ✅ All in deployment.yaml | ❌ Separate Certificate CR |
@@ -139,7 +153,7 @@ Certificates are configured with:
 3. New cert is written directly to pod filesystem
 4. Spring Boot detects file change and hot-reloads (via `reload-on-update: true`)
 
-No pod restart required — certificates rotate seamlessly.
+No pod restart required - certificates rotate seamlessly.
 
 ## How Java Services Use Certificates
 
@@ -169,9 +183,9 @@ volumeMounts:
 ```
 
 This makes certificates available at:
-- `/certs/tls.crt` — service certificate
-- `/certs/tls.key` — private key
-- `/certs/ca.crt` — CA certificate (for trusting other services)
+- `/certs/tls.crt` - service certificate
+- `/certs/tls.key` - private key
+- `/certs/ca.crt` - CA certificate (for trusting other services)
 
 ### Spring Boot SSL Bundles
 
@@ -244,7 +258,7 @@ cp .env.example .env
 # Edit .env with your AWS_ACCOUNT_ID, DOMAIN, HOSTED_ZONE_ID
 
 # 2. Run setup
-./setup.sh
+./scripts/setup.sh
 ```
 
 ## Test
@@ -265,7 +279,7 @@ Expected response:
 ## Teardown
 
 ```bash
-./teardown.sh
+./scripts/teardown.sh
 ```
 
 ---
@@ -274,17 +288,41 @@ Expected response:
 
 Telepresence allows you to develop locally while connected to the cluster network. There are two modes:
 
-### 1. Connect Mode — Call In-Cluster Services from Local Machine
+### Dev Certificate Issuance
+
+The cert-manager CSI driver stores private keys in tmpfs (in-memory only) - they never touch disk and never leave the node. Extracting certs from pods via `kubectl exec` would undermine this security model by copying the private key over the network onto your laptop.
+
+Instead, a Lambda function issues dev certificates from the dev subordinate CA and stores them in AWS Secrets Manager. No private keys are generated on any developer or admin machine:
+
+```bash
+# Admin or dev: request a cert (Lambda issues it, stores in Secrets Manager)
+./scripts/request-dev-cert.sh greeting-service
+
+# Dev: pull the cert to local machine
+./scripts/fetch-dev-cert.sh greeting-service
+```
+
+This creates `.certs/greeting-service/tls.crt`, `tls.key`, and `ca.crt`. The cert has the same SAN as the in-cluster service (`greeting-service.greeting-service-ns.svc.cluster.local`) and is valid for 30 days. Since it chains to the same root CA, in-cluster services trust it automatically. The Lambda skips issuance if a valid cert already exists.
+
+Developers need `secretsmanager:GetSecretValue` permission. Only the Lambda needs PCA issuance permissions.
+
+You can inspect certificates with:
+```bash
+./scripts/inspect-cert.sh local greeting-service   # inspect local dev cert
+./scripts/inspect-cert.sh pod greeting-service     # inspect cert inside the pod
+```
+
+### 1. Connect Mode - Call In-Cluster Services from Local Machine
 
 Use this when you want to call services running in the cluster from your local machine.
 
 **Quick start with script:**
 ```bash
-./call-service.sh greeting   # calls greeting-service
-./call-service.sh quote      # calls quote-service
+./scripts/call-service.sh greeting   # calls greeting-service
+./scripts/call-service.sh quote      # calls quote-service
 ```
 
-The script handles Telepresence connection and CA cert extraction automatically.
+The script handles Telepresence connection and CA cert download from PCA automatically.
 
 **Manual setup:**
 
@@ -293,35 +331,40 @@ Connect to the cluster:
 telepresence connect
 ```
 
-**Extract the CA certificate:**
+**Download the CA certificate from PCA:**
 ```bash
-kubectl get secret greeting-service-tls -n greeting-service-ns \
-  -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+mkdir -p .certs/greeting-service
+aws acm-pca get-certificate-authority-certificate \
+  --certificate-authority-arn "$ROOT_CA_ARN" \
+  --region ca-central-1 \
+  --query 'Certificate' --output text > .certs/greeting-service/ca.crt
 ```
 
 **Call services using cluster DNS:**
 ```bash
 # Call greeting-service
-curl --cacert ca.crt https://greeting-service.greeting-service-ns.svc.cluster.local:8443/greeting
+curl --cacert .certs/greeting-service/ca.crt https://greeting-service.greeting-service-ns.svc.cluster.local:8443/greeting
 
 # Call quote-service directly
-curl --cacert ca.crt https://quote-service.quote-service-ns.svc.cluster.local:8443/quote
+curl --cacert .certs/greeting-service/ca.crt https://quote-service.quote-service-ns.svc.cluster.local:8443/quote
 ```
 
 **What is `ca.crt`?**
 
-It's the public certificate of the AWS Private CA root. Your client needs it to verify that the server's certificate was signed by a trusted authority. Without it, you get "certificate signed by unknown authority" errors. It's safe to distribute — only the CA's private key (which stays in AWS PCA) needs protection.
+It's the public certificate of the AWS Private CA root. Your client needs it to verify that the server's certificate was signed by a trusted authority. Without it, you get "certificate signed by unknown authority" errors. It's safe to distribute - only the CA's private key (which stays in AWS PCA) needs protection.
 
-### 2. Intercept Mode — Route Cluster Traffic to Local Service
+### 2. Intercept Mode - Route Cluster Traffic to Local Service
 
-Use this when you want to intercept traffic destined for a cluster service and handle it locally.
+Use this when you want to intercept traffic destined for a cluster service and handle it locally. Note: only global intercepts work with app-managed TLS (see important considerations below).
 
 **Quick start with script:**
 ```bash
-# Terminal 1 - Run service locally with cluster certs
-./run-local.sh greeting-service
+# Terminal 1 - Get cert and run service locally
+./scripts/request-dev-cert.sh greeting-service
+./scripts/fetch-dev-cert.sh greeting-service
+./scripts/run-local.sh greeting-service
 
-# Terminal 2 - Start intercept
+# Terminal 2 - Start intercept (global - all traffic routes to local)
 telepresence connect -n greeting-service-ns
 telepresence intercept greeting-service --port 8443:8443
 
@@ -336,39 +379,35 @@ curl --cacert .certs/greeting-service/ca.crt \
 
 **Manual setup (if not using script):**
 
-Extract the full certificate set:
+Issue a local certificate:
 ```bash
-# You need all three files to terminate TLS locally
-kubectl get secret greeting-service-tls -n greeting-service-ns \
-  -o jsonpath='{.data.tls\.crt}' | base64 -d > tls.crt
-kubectl get secret greeting-service-tls -n greeting-service-ns \
-  -o jsonpath='{.data.tls\.key}' | base64 -d > tls.key
-kubectl get secret greeting-service-tls -n greeting-service-ns \
-  -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+./scripts/request-dev-cert.sh greeting-service
+./scripts/fetch-dev-cert.sh greeting-service
+# Creates .certs/greeting-service/tls.crt, tls.key, ca.crt
 ```
 
-**Run your local service with the cluster certs:**
+**Run your local service with the locally-issued certs:**
 ```bash
 java -jar greeting-service/target/*.jar \
-  --spring.ssl.bundle.pem.server.keystore.certificate=tls.crt \
-  --spring.ssl.bundle.pem.server.keystore.private-key=tls.key \
-  --spring.ssl.bundle.pem.server.truststore.certificate=ca.crt \
-  --spring.ssl.bundle.pem.client.truststore.certificate=ca.crt
+  --spring.ssl.bundle.pem.server.keystore.certificate=.certs/greeting-service/tls.crt \
+  --spring.ssl.bundle.pem.server.keystore.private-key=.certs/greeting-service/tls.key \
+  --spring.ssl.bundle.pem.server.truststore.certificate=.certs/greeting-service/ca.crt \
+  --spring.ssl.bundle.pem.client.truststore.certificate=.certs/greeting-service/ca.crt
 ```
 
 **Start the intercept:**
 ```bash
-telepresence intercept greeting-service -n greeting-service-ns --port 8443:8443
+telepresence intercept greeting-service --port 8443:8443
 ```
 
-Now all traffic to `greeting-service` in the cluster routes to your local machine.
+All traffic to `greeting-service` in the cluster routes to your local machine.
 
 **Important considerations:**
 
-- **Certificate SANs**: The certificates have SANs for `<service>.<namespace>.svc.cluster.local`. Telepresence routes DNS correctly, so hostname verification should work.
-- **Certificate rotation**: Cluster certs rotate every 24h. For long dev sessions, re-fetch the certs periodically.
+- **Certificate SANs**: The locally-issued certificates have the same SANs as in-cluster certs (`<service>.<namespace>.svc.cluster.local`). Telepresence routes DNS correctly, so hostname verification works.
+- **Certificate validity**: Dev certs are valid for 30 days (vs 24h for pod certs). The Lambda skips re-issuance if a valid cert exists; use `--force` with `request-dev-cert.sh` to re-issue.
 - **Health checks**: The ALB health checks go to port 8080 (HTTP). Make sure your local service also exposes the actuator on 8080, or the ALB will mark the target unhealthy.
-
+- **Header-based intercepts don't work with app-managed TLS**: The traffic agent operates at L7 (HTTP) for header-based intercepts but at L4 (TCP) for global intercepts. With header-based routing (`--http-header`), the agent needs to read HTTP headers to decide where to route traffic. But traffic arriving on port 8443 is TLS-encrypted - the agent sees a TLS ClientHello, not an HTTP request. It can't parse headers from encrypted bytes, so the TLS handshake fails. This breaks ALL traffic on the intercepted port (not just requests with the header) because the agent has replaced the app as the listener on 8443. Only global intercepts work with app-managed TLS - they proxy raw TCP bytes without inspecting traffic, so TLS passes through opaquely. Header-based intercepts work fine with Istio Ambient because ztunnel handles mTLS at the node level and delivers decrypted plain HTTP to the pod - the traffic agent can read headers and route accordingly.
 **Disconnect when done:**
 ```bash
 telepresence leave greeting-service
@@ -381,59 +420,9 @@ telepresence quit
 
 To add a new TLS-enabled service to this setup:
 
-### 1. Create the Certificate CR
+### 1. Add CSI Volume to Your Deployment
 
-Create a `certificate.yaml` that tells cert-manager to request a certificate from AWS PCA:
-
-```yaml
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: my-service-tls
-  namespace: my-service-ns
-spec:
-  # Secret where cert-manager stores the issued certificate
-  secretName: my-service-tls
-
-  # Reference to the AWS PCA issuer (cluster-wide)
-  issuerRef:
-    name: aws-pca-issuer
-    kind: AWSPCAClusterIssuer
-    group: awspca.cert-manager.io
-
-  # DNS names for the certificate (SANs)
-  dnsNames:
-    - my-service.my-service-ns.svc.cluster.local
-
-  # Certificate lifetime and renewal
-  duration: 24h
-  renewBefore: 4h
-
-  # Key algorithm (ECDSA P-256 recommended)
-  privateKey:
-    algorithm: ECDSA
-    size: 256
-```
-
-Apply it:
-```bash
-kubectl apply -f certificate.yaml
-```
-
-cert-manager will:
-1. Generate a private key
-2. Create a CSR and send it to AWS PCA via aws-privateca-issuer
-3. Store the issued cert in the Secret `my-service-tls`
-
-Verify:
-```bash
-kubectl get certificate -n my-service-ns
-kubectl get secret my-service-tls -n my-service-ns
-```
-
-### 2. Mount the Certificate in Your Deployment
-
-Add volume and volumeMount to your deployment:
+Declare the certificate inline in your pod spec - no separate Certificate CR or Secret needed:
 
 ```yaml
 spec:
@@ -447,16 +436,29 @@ spec:
               readOnly: true
       volumes:
         - name: tls
-          secret:
-            secretName: my-service-tls
+          csi:
+            driver: csi.cert-manager.io
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-name: aws-pca-issuer
+              csi.cert-manager.io/issuer-kind: AWSPCAClusterIssuer
+              csi.cert-manager.io/issuer-group: awspca.cert-manager.io
+              csi.cert-manager.io/common-name: my-service
+              csi.cert-manager.io/dns-names: my-service.my-service-ns.svc.cluster.local
+              csi.cert-manager.io/duration: "24h"
+              csi.cert-manager.io/renew-before: "4h"
+              csi.cert-manager.io/key-algorithm: ECDSA
+              csi.cert-manager.io/key-size: "256"
 ```
 
 This makes the certificates available at:
-- `/certs/tls.crt` — your service's certificate
-- `/certs/tls.key` — your service's private key
-- `/certs/ca.crt` — CA certificate for trusting other services
+- `/certs/tls.crt` - your service's certificate
 
-### 3. Configure Spring Boot SSL Bundles
+**Note**: `dns-names` must be the full FQDN (e.g. `my-service.my-service-ns.svc.cluster.local`). The CSI driver passes this value directly into the certificate's SAN - it does not append `.svc.cluster.local` automatically. If you use just the short name, TLS hostname verification will fail when clients connect using the FQDN.
+- `/certs/tls.key` - your service's private key
+- `/certs/ca.crt` - CA certificate for trusting other services
+
+### 2. Configure Spring Boot SSL Bundles
 
 Add to your `application.yml`:
 
@@ -490,7 +492,7 @@ spring:
             certificate: /certs/ca.crt
 ```
 
-### 4. Create the Service
+### 3. Create the Service
 
 Expose both the HTTPS port and management port:
 
@@ -513,7 +515,7 @@ spec:
       targetPort: 8080
 ```
 
-### 5. (Optional) Expose via Ingress
+### 4. (Optional) Expose via Ingress
 
 If the service needs external access:
 
@@ -550,9 +552,8 @@ spec:
 
 ### Checklist
 
-- [ ] Certificate CR created and issued (`kubectl get certificate`)
-- [ ] Secret contains `tls.crt`, `tls.key`, `ca.crt`
-- [ ] Deployment mounts the secret at `/certs`
+- [ ] Deployment has CSI volume with cert-manager attributes (issuer, DNS names, duration)
+- [ ] Pod mounts certs at `/certs` (tls.crt, tls.key, ca.crt)
 - [ ] Spring Boot configured with SSL bundles
 - [ ] Service exposes port 8443 (https) and 8080 (management)
 - [ ] Health checks target port 8080 (HTTP)
@@ -567,12 +568,19 @@ e2e-tls-demo/
 ├── README.md
 ├── .env.example          # Environment template (copy to .env)
 ├── .gitignore
-├── setup.sh              # Full infrastructure + app deployment
-├── teardown.sh           # Clean up everything
-├── run-local.sh          # Run service locally for Telepresence intercept
-├── call-service.sh       # Call in-cluster services via Telepresence connect
+├── pca-hierarchy-alternative.md  # Design note: CA hierarchy rationale
+├── scripts/
+│   ├── setup.sh              # Full infrastructure + app deployment
+│   ├── teardown.sh           # Clean up everything
+│   ├── request-dev-cert.sh   # Invoke Lambda to issue dev cert → Secrets Manager
+│   ├── fetch-dev-cert.sh     # Pull dev cert from Secrets Manager to local .certs/
+│   ├── run-local.sh          # Run service locally for Telepresence intercept
+│   ├── call-service.sh       # Call in-cluster services via Telepresence connect
+│   └── inspect-cert.sh       # Inspect local dev certs or pod certs
+├── lambda/
+│   └── issue_dev_cert.py     # Lambda: issues cert from dev CA, stores in Secrets Manager
 ├── diagrams/
-│   └── e2e-tls-demo.drawio    # All diagrams (4 tabs: Architecture, Cert Flow, Connect, Intercept)
+│   └── e2e-tls-demo.drawio   # All diagrams (4 tabs: Architecture, Cert Flow, Connect, Intercept)
 ├── greeting-service/
 │   ├── pom.xml
 │   ├── Dockerfile

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 #
-# Run a service locally with cluster TLS certs for Telepresence intercept
+# Run a service locally with PCA-issued TLS certs for Telepresence intercept.
 #
 # Usage: ./run-local.sh <service-name>
 #   service-name: greeting-service or quote-service
 #
-# Note: With CSI driver, certs are only in pod filesystem (no Secrets).
-# This script extracts them by exec'ing into the pod.
+# Prerequisites:
+#   Run ./request-dev-cert.sh <service-name> then ./fetch-dev-cert.sh <service-name> first.
 #
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SERVICE_NAME="${1:-}"
 if [[ -z "$SERVICE_NAME" ]]; then
@@ -21,8 +22,8 @@ if [[ -z "$SERVICE_NAME" ]]; then
 fi
 
 NAMESPACE="${SERVICE_NAME}-ns"
-CERTS_DIR="$SCRIPT_DIR/.certs/$SERVICE_NAME"
-JAR_PATH="$SCRIPT_DIR/$SERVICE_NAME/target/$SERVICE_NAME-0.0.1-SNAPSHOT.jar"
+CERTS_DIR="$PROJECT_DIR/.certs/$SERVICE_NAME"
+JAR_PATH="$PROJECT_DIR/$SERVICE_NAME/target/$SERVICE_NAME-0.0.1-SNAPSHOT.jar"
 
 # Check JAR exists
 if [[ ! -f "$JAR_PATH" ]]; then
@@ -31,22 +32,28 @@ if [[ ! -f "$JAR_PATH" ]]; then
   exit 1
 fi
 
-# Create certs directory
-mkdir -p "$CERTS_DIR"
+# Check certs exist
+if [[ ! -s "$CERTS_DIR/tls.crt" || ! -s "$CERTS_DIR/tls.key" || ! -s "$CERTS_DIR/ca.crt" ]]; then
+  echo "Certificates not found in $CERTS_DIR"
+  echo "Run first:"
+  echo "  ./request-dev-cert.sh $SERVICE_NAME"
+  echo "  ./fetch-dev-cert.sh $SERVICE_NAME"
+  exit 1
+fi
 
-echo "=== Extracting certificates from pod (CSI driver) ==="
-POD_NAME=$(kubectl get pod -n "$NAMESPACE" -l app="$SERVICE_NAME" -o jsonpath='{.items[0].metadata.name}')
-echo "Pod: $POD_NAME"
+# Check cert hasn't expired
+if ! openssl x509 -checkend 0 -noout -in "$CERTS_DIR/tls.crt" 2>/dev/null; then
+  echo "Certificate has expired. Re-issue:"
+  echo "  ./request-dev-cert.sh $SERVICE_NAME && ./fetch-dev-cert.sh $SERVICE_NAME"
+  exit 1
+fi
 
-kubectl exec -n "$NAMESPACE" "$POD_NAME" -- cat /certs/tls.crt > "$CERTS_DIR/tls.crt"
-kubectl exec -n "$NAMESPACE" "$POD_NAME" -- cat /certs/tls.key > "$CERTS_DIR/tls.key"
-kubectl exec -n "$NAMESPACE" "$POD_NAME" -- cat /certs/ca.crt > "$CERTS_DIR/ca.crt"
-
-echo "Certificates saved to: $CERTS_DIR"
+EXPIRY=$(openssl x509 -noout -enddate -in "$CERTS_DIR/tls.crt" | cut -d= -f2)
 
 echo ""
 echo "=== Starting $SERVICE_NAME locally ==="
-echo "Ports: 8443 (HTTPS), 8080 (HTTP management)"
+echo "Certs:   $CERTS_DIR (expires: $EXPIRY)"
+echo "Ports:   8443 (HTTPS), 8080 (HTTP management)"
 echo ""
 echo "To intercept, run in another terminal:"
 echo "  telepresence connect -n $NAMESPACE"

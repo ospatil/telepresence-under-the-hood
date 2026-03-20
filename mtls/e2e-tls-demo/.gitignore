@@ -4,6 +4,10 @@
 # Extracted certificates
 .certs/
 
+# Lambda dependencies (installed at deploy time by setup.sh)
+lambda/*
+!lambda/issue_dev_cert.py
+
 # Build artifacts
 target/
 *.jar

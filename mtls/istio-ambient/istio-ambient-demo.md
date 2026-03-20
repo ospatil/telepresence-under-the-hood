@@ -13,13 +13,13 @@ This demonstrates automatic mTLS between services using Istio Ambient mode (side
 Istio Ambient splits the data plane into two layers:
 
 ```
-Layer 1 — ztunnel (always on, L4):
+Layer 1 - ztunnel (always on, L4):
   DaemonSet, one per node. Handles mTLS encryption and L4 auth.
   No sidecars, no pod changes.
 
   service-c pod ──▶ ztunnel (Node 1) ══mTLS══▶ ztunnel (Node 2) ──▶ service-d pod
 
-Layer 2 — waypoint proxy (optional, L7):
+Layer 2 - waypoint proxy (optional, L7):
   Standalone Envoy pod, deployed per namespace or per service.
   Only needed for HTTP routing, retries, L7 auth, traffic splitting, etc.
   NOT needed for this demo.
@@ -84,7 +84,7 @@ helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespa
 helm repo add awspca https://cert-manager.github.io/aws-privateca-issuer
 helm install aws-pca-issuer awspca/aws-privateca-issuer -n cert-manager
 
-# istio-csr — bridges istiod cert requests to cert-manager
+# istio-csr - bridges istiod cert requests to cert-manager
 # caTrustedNodeAccounts enables ambient mode (ztunnel cert requests)
 helm repo add jetstack https://charts.jetstack.io
 helm install istio-csr jetstack/cert-manager-istio-csr -n cert-manager \
@@ -172,7 +172,7 @@ istioctl ztunnel-config workloads | grep -E 'service-c|service-d'
 
 ### 3.2 Wire-level validation with tcpdump
 
-Same approach as the Linkerd demo — attach a debug container to the service-d pod:
+Same approach as the Linkerd demo - attach a debug container to the service-d pod:
 
 **Capture external traffic (mTLS encrypted):**
 
@@ -199,7 +199,7 @@ External traffic shows encrypted gibberish; localhost traffic shows plain HTTP. 
 
 ## Phase 4: Telepresence + Istio Ambient mTLS Demo
 
-Istio Ambient defaults to PERMISSIVE mTLS — it accepts both mTLS (from meshed pods) and plain HTTP (from unmeshed sources like Telepresence).
+Istio Ambient defaults to PERMISSIVE mTLS - it accepts both mTLS (from meshed pods) and plain HTTP (from unmeshed sources like Telepresence).
 
 ### 4.1 Connect and verify
 
@@ -238,14 +238,14 @@ telepresence leave service-c-deployment
 telepresence intercept service-c-deployment --port 8080:8080 --http-header x-dev=local
 ```
 
-Test with header — hits local:
+Test with header - hits local:
 
 ```bash
 curl -H "x-dev: local" http://service-c.service-c-ns:8080
 # Expected: {"message":"Hello from service-d! and Hello from local service-c!","path":"/"}
 ```
 
-Test without header — hits in-cluster (through mTLS mesh):
+Test without header - hits in-cluster (through mTLS mesh):
 
 ```bash
 curl http://service-c.service-c-ns:8080
@@ -275,13 +275,13 @@ telepresence quit -s
 
 ## Design Decisions
 
-1. **No waypoint proxy** — We only need mTLS (L4). Waypoint proxies are for L7 features (HTTP routing, retries, auth policies) and add unnecessary complexity for this demo.
+1. **No waypoint proxy** - We only need mTLS (L4). Waypoint proxies are for L7 features (HTTP routing, retries, auth policies) and add unnecessary complexity for this demo.
 
-2. **Istio manages its own certs** — Unlike Linkerd which requires external cert management (cert-manager), istiod has a built-in CA that automatically issues and rotates workload certificates. No additional cert setup needed. For production, you can swap to AWS Private CA via `istio-csr` + `aws-privateca-issuer` — see [Production Alternative: AWS Private CA](#production-alternative-aws-private-ca).
+2. **Istio manages its own certs** - Unlike Linkerd which requires external cert management (cert-manager), istiod has a built-in CA that automatically issues and rotates workload certificates. No additional cert setup needed. For production, you can swap to AWS Private CA via `istio-csr` + `aws-privateca-issuer` - see [Production Alternative: AWS Private CA](#production-alternative-aws-private-ca).
 
-3. **PERMISSIVE mTLS** — Default mode, same as Linkerd. Accepts both mTLS and plain HTTP, enabling Telepresence compatibility without configuration changes.
+3. **PERMISSIVE mTLS** - Default mode, same as Linkerd. Accepts both mTLS and plain HTTP, enabling Telepresence compatibility without configuration changes.
 
-4. **Separate namespaces** — Istio Ambient services run in their own namespaces (`service-c-ns`, `service-d-ns`).
+4. **Separate namespaces** - Istio Ambient services run in their own namespaces (`service-c-ns`, `service-d-ns`).
 
 ## Uninstalling Istio Ambient
 
