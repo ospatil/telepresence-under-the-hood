@@ -634,6 +634,7 @@ spec:
 ```
 e2e-tls-demo/
 ├── README.md
+├── demo-runbook.md           # Step-by-step guided demo for live presentation
 ├── .env.example          # Environment template (copy to .env)
 ├── .gitignore
 ├── pca-hierarchy-alternative.md  # Design note: CA hierarchy rationale

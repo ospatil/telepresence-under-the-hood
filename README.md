@@ -76,6 +76,10 @@ Refer to [Telepresence and Kyverno](./policy/telepresence-with-kyverno.md)
 ### End-to-End App Managed TLS with cert-manager CSI Driver
 
 * [E2E TLS Demo — AWS PCA + cert-manager + Spring Boot + Telepresence](./mtls/e2e-tls-demo/README.md)
+* [Marp Presentation — App-Managed TLS on EKS](./mtls/e2e-tls-presentation.md)
+* [Demo Runbook — Guided live demo steps](./mtls/e2e-tls-demo/demo-runbook.md)
+* [Istio Ambient Summary — Talking points and comparison](./mtls/istio-ambient-summary.md)
+* [PCA Hierarchy Design Note](./mtls/e2e-tls-demo/pca-hierarchy-alternative.md)
 
 #### Understanding the mTLS Encryption Boundary
 
