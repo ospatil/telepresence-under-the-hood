@@ -72,5 +72,7 @@ exec java -jar "$JAR_PATH" \
   --spring.ssl.bundle.pem.server.keystore.certificate="$CERTS_DIR/tls.crt" \
   --spring.ssl.bundle.pem.server.keystore.private-key="$CERTS_DIR/tls.key" \
   --spring.ssl.bundle.pem.server.truststore.certificate="$CERTS_DIR/ca.crt" \
+  --spring.ssl.bundle.pem.client.keystore.certificate="$CERTS_DIR/tls.crt" \
+  --spring.ssl.bundle.pem.client.keystore.private-key="$CERTS_DIR/tls.key" \
   --spring.ssl.bundle.pem.client.truststore.certificate="$CERTS_DIR/ca.crt" \
   --logging.level.org.springframework.web=DEBUG

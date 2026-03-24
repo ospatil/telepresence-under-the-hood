@@ -5,7 +5,7 @@ paginate: true
 backgroundColor: #fff
 style: |
   section {
-    font-size: 24px;
+    font-size: 22px;
   }
   h1 {
     color: #232f3e;
@@ -17,13 +17,13 @@ style: |
     color: #232f3e;
   }
   table {
-    font-size: 20px;
-  }
-  code {
     font-size: 18px;
   }
-  pre {
+  code {
     font-size: 16px;
+  }
+  pre {
+    font-size: 14px;
   }
 ---
 
@@ -59,30 +59,31 @@ style: |
 ```
         Client (browser/curl)
             |
-            |  HTTPS :443 (ACM public cert)
+            |  HTTPS :443 (ACM public cert, server-auth only)
             v
   +---------------------+
   |         ALB         |  Terminates public TLS,
   |  (internet-facing)  |  re-encrypts to pod,
   +---------------------+  Provisioned by AWS LB Controller
             |
-            |  HTTPS :8443 (PCA cert, backend-protocol: HTTPS, target-type: ip)
+            |  HTTPS :8443 (PCA cert, server-auth only - ALB doesn't send client cert)
             v
   +---------------------+
   |  greeting-service   |  App terminates TLS,
-  |  (Spring Boot)      |  calls quote-service over HTTPS
+  |  (Spring Boot)      |  calls quote-service over mTLS
   +---------------------+
             |
-            |  HTTPS :8443 (PCA cert, mutual CA trust)
+            |  mTLS :8443 (PCA certs, client-auth: NEED)
             v
   +---------------------+
-  |    quote-service    |  App terminates TLS
-  |    (Spring Boot)    |
+  |    quote-service    |  App terminates TLS,
+  |    (Spring Boot)    |  verifies greeting's client cert
   +---------------------+
 ```
 
-Every segment is TLS-encrypted. Health checks use a separate plain HTTP port (8080).
-DNS via Route53 resolves `greeting.<domain>` to the ALB.
+- Every segment is TLS-encrypted. Health checks use a separate plain HTTP port (8080)
+- ALB → pod is server-auth only (ALB doesn't present a client cert)
+- Pod → pod is full mTLS (both sides present and verify certs via shared root CA)
 
 ---
 
@@ -114,19 +115,16 @@ DNS via Route53 resolves `greeting.<domain>` to the ALB.
 
 ## The Three Components
 
-Three Kubernetes extension points work together:
+Three Kubernetes extension points, all installed via Helm:
 
 - **cert-manager** - Kubernetes operator (CRDs + controllers) that orchestrates certificate lifecycle: CSR creation, CA submission, renewal
 - **aws-privateca-issuer** - cert-manager external issuer plugin that calls the AWS PCA API. cert-manager has a plugin interface for third-party CA backends (Vault, Venafi, Google CAS, etc.)
 - **cert-manager CSI driver** - Kubernetes CSI (Container Storage Interface) driver. Same plugin interface as EBS/EFS, but instead of mounting a disk, it generates a private key on the node, gets it signed via cert-manager, and writes the cert to a tmpfs volume inside the pod
 
-```
-Pod starts --> CSI driver (on node) --> cert-manager --> aws-pca-issuer --> AWS PCA API
-                  |                                                            |
-                  |<-------------- signed cert + chain <-----------------------|
-                  |
-                  v
-            tmpfs volume (key + cert, RAM only)
+```bash
+helm install cert-manager jetstack/cert-manager --set crds.enabled=true
+helm install cert-manager-csi-driver jetstack/cert-manager-csi-driver
+helm install aws-pca-issuer awspca/aws-privateca-issuer
 ```
 
 ---
@@ -139,29 +137,25 @@ Pod starts --> CSI driver (on node) --> cert-manager --> aws-pca-issuer --> AWS 
     v
   CSI driver ----> cert-manager ----> aws-privateca-issuer ----> AWS PCA
     |                                                            (cluster CA)
-    |  reads volume                                                  |
-    |  attributes                                           issues certificate
     |                                                                |
     v                                                                |
   Pod filesystem  <----------  cert written to tmpfs  <--------------+
-  /certs/tls.crt, tls.key, ca.crt
+  <mount-path>/tls.crt, tls.key, ca.crt
 ```
 
 1. Pod spec declares CSI volume with cert attributes (issuer, DNS names, duration)
-2. CSI driver requests certificate from cert-manager --> AWS PCA
-3. Certificate written directly to pod filesystem at `/certs/`
-4. CSI driver handles **renewal automatically** before expiry
+2. CSI driver generates key on the node, requests cert via cert-manager → AWS PCA
+3. Cert written to pod tmpfs at configurable mount path (e.g. `/certs/`)
+4. Same cert serves as both server and client identity (PCA certs include both EKUs - Extended Key Usages)
 
 ---
 
 ## CSI Driver - Security Properties
 
-Certificates live in **tmpfs** (in-memory only):
-
-- 🔒 **In-memory only** - keys never written to disk on the node
+- 🔒 **In-memory only** (tmpfs) - keys never written to disk on the node
 - 🔒 **Key never leaves the node** - generated locally by CSI driver
-- 🔒 **Ephemeral lifecycle** - destroyed when pod terminates
-- 🔒 **No Kubernetes Secrets** - nothing stored in etcd
+- 🔒 **Ephemeral** - destroyed when pod terminates, no Kubernetes Secrets in etcd
+- 🔒 **Node failure** - pod rescheduled on new node gets a brand new key + cert (no key migration, old key gone from RAM)
 
 ---
 
@@ -189,57 +183,77 @@ Certificates live in **tmpfs** (in-memory only):
 
 ---
 
-## Spring Boot SSL Bundles
+## Spring Boot SSL Bundles + mTLS
 
-```yaml
-spring:
-  ssl:
-    bundle:
-      pem:
-        server:                              # Incoming TLS on port 8443
-          keystore:
-            certificate: /certs/tls.crt
-            private-key: /certs/tls.key
-          truststore:
-            certificate: /certs/ca.crt       # Trust the root CA
-          reload-on-update: true             # Hot-reload on cert rotation
-        client:                              # Outgoing calls to other services
-          truststore:
-            certificate: /certs/ca.crt
-```
-
-- **`server` bundle** - terminates incoming TLS using the service's own cert
-- **`client` bundle** - trusts any cert signed by the same root CA
-- Port **8080** runs plain HTTP - health checks only
-
----
-
-## How the App Uses Each Bundle
-
-**Server bundle** - Spring Boot automatically terminates TLS on port 8443. No code needed:
 ```yaml
 server:
   port: 8443
   ssl:
-    bundle: server    # references the 'server' SSL bundle
+    bundle: server
+    client-auth: NEED    # Require client certificate (internal services)
+
+spring:
+  ssl:
+    bundle:
+      pem:
+        server:                              # Incoming TLS
+          keystore:
+            certificate: /certs/tls.crt
+            private-key: /certs/tls.key
+          truststore:
+            certificate: /certs/ca.crt
+          reload-on-update: true
+        client:                              # Outgoing calls to other services
+          keystore:
+            certificate: /certs/tls.crt      # Present as client identity
+            private-key: /certs/tls.key
+          truststore:
+            certificate: /certs/ca.crt
 ```
 
-**Client bundle** - used explicitly when calling other TLS services:
+- Same cert/key pair serves both server and client identity
+- `server` bundle terminates incoming TLS; `client` bundle authenticates outgoing calls
+- Port **8080** runs plain HTTP for health checks only
+
+---
+
+## mTLS Flow + ALB Constraint
+
+```
+greeting-service --> quote-service
+  1. quote presents server cert --> greeting verifies via client truststore ✅
+  2. quote demands client cert  --> greeting presents via client keystore  ✅
+  3. quote verifies greeting's cert via server truststore (same root CA)  ✅
+```
+
+ALB terminates and re-encrypts TLS but **does not present a client certificate**:
+
+| | ALB-facing services | Internal-only services |
+|---|---|---|
+| Example | greeting-service | quote-service |
+| `client-auth` | not set (default NONE) | `NEED` |
+| Incoming TLS | Server-auth only | Full mTLS |
+
+- Full mTLS on ingress is possible with NLB (L4 passthrough) but adds complexity and loses path routing, WAF
+- **Server-auth from ALB + mTLS between services** is the right balance for most workloads
+
+---
+
+## Using the Client Bundle in Code
+
 ```java
 @Bean
 public RestClient restClient(SslBundles sslBundles) {
     SSLContext sslContext = sslBundles.getBundle("client").createSslContext();
     HttpClient httpClient = HttpClient.newBuilder()
-            .sslContext(sslContext)
-            .build();
+            .sslContext(sslContext).build();
     return RestClient.builder()
             .baseUrl("https://quote-service.quote-service-ns.svc.cluster.local:8443")
-            .requestFactory(new JdkClientHttpRequestFactory(httpClient))
-            .build();
+            .requestFactory(new JdkClientHttpRequestFactory(httpClient)).build();
 }
 ```
 
-The `client` bundle's truststore contains `ca.crt` (root CA) - verifies quote-service's cert.
+The `client` bundle's SSLContext includes both the truststore (verify server) and keystore (present client cert).
 
 ---
 
@@ -248,6 +262,12 @@ The `client` bundle's truststore contains `ca.crt` (root CA) - verifies quote-se
 Add a CSI volume to the deployment - no separate Certificate CR or Secret:
 
 ```yaml
+containers:
+  - name: my-service
+    volumeMounts:
+      - name: tls
+        mountPath: /certs    # configurable - match your application.yml paths
+        readOnly: true
 volumes:
   - name: tls
     csi:
@@ -318,24 +338,39 @@ Multiple developers can intercept the **same service** simultaneously with diffe
 
 ---
 
+## The Requirement
+
+For Telepresence to work with app-managed TLS, the locally running service must:
+
+1. **Present a cert with the same SAN** as the in-cluster service (e.g. `greeting-service.greeting-service-ns.svc.cluster.local`)
+2. **Chain to the same root CA** so in-cluster services trust it (and vice versa)
+3. **Include a client keystore** so it can authenticate via mTLS when calling other services
+
+Without this, the intercepted traffic fails TLS handshake - the calling service expects a cert matching the in-cluster identity.
+
+---
+
 ## Dev Certificates - One Possible Approach
 
-A **Lambda** issues dev certs from the dev subordinate CA and stores them in Secrets Manager. Developers pull certs when needed:
+- A **dedicated dev CA** (subordinate to the same root) issues dev certs - optional but recommended for separation from the cluster CA. The cluster CA could issue dev certs too, but a separate dev CA lets you apply different policies (shorter validity, restricted SANs, independent revocation)
+- An **admin or platform team** runs a Lambda that generates certs and stores them in **Secrets Manager**
+- Developers only pull pre-issued certs - they never interact with PCA directly
 
 ```bash
-# Lambda issues cert, stores in Secrets Manager
+# Admin/platform: Lambda issues cert from dev CA, stores in Secrets Manager
 ./scripts/request-dev-cert.sh greeting-service
 
-# Developer pulls cert to local machine
+# Developer: pulls cert to local machine
 ./scripts/fetch-dev-cert.sh greeting-service
 
-# Run locally with the cert
+# Developer: runs locally with the cert
 ./scripts/run-local.sh greeting-service
 ```
 
-- Dev certs valid for **7 days** - Lambda skips if valid cert exists
+- Dev certs valid for **7 days** (short-lived CA mode)
 - Developers only need `secretsmanager:GetSecretValue` - no PCA access
-- Private keys generated **inside Lambda**, stored in Secrets Manager
+- Private keys generated **inside Lambda**, never on developer machines
+- Separation of concerns: platform team controls issuance, developers consume certs
 
 ---
 
@@ -395,55 +430,25 @@ curl --cacert .certs/greeting-service/ca.crt \       # via cluster DNS
 ## Inspect Certificates
 
 ```bash
-# Local dev cert
-./scripts/inspect-cert.sh local greeting-service
-
-# === Local dev cert (greeting-service) ===
-# subject=CN=greeting-service
-# issuer=CN=e2e-tls-demo-dev-ca          <-- issued by dev CA
-# X509v3 Subject Alternative Name:
-#     DNS:greeting-service.greeting-service-ns.svc.cluster.local
-
-# Pod cert
 ./scripts/inspect-cert.sh pod greeting-service
 
 # === Pod cert (greeting-service) ===
 # subject=CN=greeting-service
-# issuer=CN=e2e-tls-demo-cluster-ca      <-- issued by cluster CA
+# issuer=CN=e2e-tls-demo-cluster-ca
 # X509v3 Subject Alternative Name:
 #     DNS:greeting-service.greeting-service-ns.svc.cluster.local
+# SSL server: Yes, SSL client: Yes        <-- same cert works for both
+# Status: VALID (expires Mar 25 19:59:44 2026 GMT)
+
+./scripts/inspect-cert.sh local greeting-service
+
+# === Local dev cert (greeting-service) ===
+# subject=CN=greeting-service
+# issuer=CN=e2e-tls-demo-dev-ca           <-- different issuer
+# X509v3 Subject Alternative Name:
+#     DNS:greeting-service.greeting-service-ns.svc.cluster.local
+# SSL server: Yes, SSL client: Yes        <-- same capabilities
+# Status: VALID (expires Mar 31 ... 2026 GMT)
 ```
 
-Different issuers, same SAN, same root CA trust --> **mutual trust works**
-
----
-
-
-# Summary
-
----
-
-## What We Built
-
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| CA hierarchy | AWS Private CA | Root + cluster CA + dev CA |
-| Pod certs | cert-manager CSI driver | In-memory, auto-rotating, per-pod |
-| App TLS | Spring Boot SSL Bundles | Server + client TLS with hot-reload |
-| ALB | ACM + `backend-protocol: HTTPS` | End-to-end encryption from internet |
-| Dev certs | Lambda + Secrets Manager | Secure dev cert issuance, no key extraction |
-| Local dev | Telepresence | Global intercepts with dev-CA-issued certs |
-
-### Key Properties
-
-- ✅ True end-to-end encryption - no plain text segments
-- ✅ Private keys never leave their trust boundary (node or Lambda)
-- ✅ Fully automated cert lifecycle - zero manual rotation
-- ✅ Developer experience preserved - Telepresence keeps the inner loop fast
-
----
-
-
-# Thank You
-
-### Questions?
+Different issuers, same SAN, same EKUs, same root CA trust --> **mutual trust works**

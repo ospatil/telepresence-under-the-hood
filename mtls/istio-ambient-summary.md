@@ -22,6 +22,13 @@
 - No cert extraction needed for local dev - your local app just speaks plain HTTP
 - Both global and header-based intercepts work seamlessly
 
+## How It Works with AWS VPC CNI
+
+- Istio Ambient requires the `istio-cni` DaemonSet - it configures iptables rules to redirect pod traffic through ztunnel
+- It uses CNI plugin chaining: `AWS VPC CNI` (assigns ENI/IP) runs first, then `istio-cni` adds redirection rules on top
+- It does NOT replace VPC CNI - it layers alongside it, making Istio Ambient CNI-agnostic
+- This is also why namespace enrollment needs no pod restarts - the CNI plugin handles redirection without modifying pods
+
 ## Certificate Management
 
 - `istiod` has a built-in CA by default - zero cert setup for basic mTLS

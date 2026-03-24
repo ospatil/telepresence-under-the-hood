@@ -35,6 +35,14 @@ print_cert_info() {
   echo "$cert_pem" | openssl x509 -noout \
     -subject -issuer -dates -ext subjectAltName 2>/dev/null
 
+  # Show server/client capability
+  local ssl_client ssl_server
+  ssl_client=$(echo "$cert_pem" | openssl x509 -noout -purpose 2>/dev/null | grep "^SSL client :" | awk '{print $4}')
+  ssl_server=$(echo "$cert_pem" | openssl x509 -noout -purpose 2>/dev/null | grep "^SSL server :" | awk '{print $4}')
+  if [[ -n "$ssl_client" || -n "$ssl_server" ]]; then
+    echo "SSL server: ${ssl_server:-N/A}, SSL client: ${ssl_client:-N/A}"
+  fi
+
   # Check expiry
   if echo "$cert_pem" | openssl x509 -checkend 0 -noout 2>/dev/null; then
     local days_left

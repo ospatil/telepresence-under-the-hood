@@ -50,7 +50,16 @@ helm install istiod istio/istiod -n istio-system --set profile=ambient --wait
 
 ### 1.4 Install CNI node agent
 
-The CNI agent configures traffic redirection between pods and ztunnel.
+The `istio-cni` agent is a DaemonSet that configures networking rules (iptables/eBPF) to redirect pod traffic through the ztunnel on each node. It uses the CNI plugin chaining model - it does NOT replace your existing CNI:
+
+```
+Pod starts --> AWS VPC CNI (assigns ENI/IP, sets up networking)
+          --> istio-cni (adds iptables rules to redirect traffic to ztunnel)
+```
+
+AWS VPC CNI handles the actual networking (pod IPs, ENIs, security groups). `istio-cni` layers traffic redirection on top. This is why Istio Ambient is CNI-agnostic - it works alongside VPC CNI, Calico, Cilium, or any other CNI.
+
+Without `istio-cni`, Istio would need to inject an init container into every pod to set up iptables rules (which is what sidecar mode does). The CNI plugin approach is cleaner - no pod modification needed, which is why Ambient can mesh a namespace instantly with just a label, no pod restarts required.
 
 ```bash
 helm install istio-cni istio/cni -n istio-system --set profile=ambient --wait

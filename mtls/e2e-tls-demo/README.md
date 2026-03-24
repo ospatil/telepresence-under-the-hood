@@ -7,39 +7,60 @@ End-to-end TLS encryption from ALB to Spring Boot pods using AWS Private CA, cer
 ```
    Client (browser/curl)
             |
-            |  HTTPS :443 (ACM public cert)
+            |  HTTPS :443 (ACM public cert, server-auth only)
             v
   +---------------------+
   |         ALB         |  Terminates public TLS,
   |  (internet-facing)  |  re-encrypts to pod,
   +---------------------+  Provisioned by AWS LB Controller
             |
-            |  HTTPS :8443 (PCA cert, backend-protocol: HTTPS, target-type: ip)
+            |  HTTPS :8443 (PCA cert, server-auth only - ALB doesn't send client cert)
             v
   +---------------------+
   |  greeting-service   |  App terminates TLS,
-  |    (Spring Boot)    |  calls quote-service over HTTPS
+  |    (Spring Boot)    |  calls quote-service over mTLS
   +---------------------+
             |
-            |  HTTPS :8443 (PCA cert, mutual CA trust)
+            |  mTLS :8443 (PCA certs, client-auth: NEED)
             v
   +---------------------+
-  |    quote-service    |  App terminates TLS
-  |    (Spring Boot)    |
+  |    quote-service    |  App terminates TLS,
+  |    (Spring Boot)    |  verifies greeting's client cert
   +---------------------+
 ```
 
 ### Traffic Flow
 
 1. **Internet → ALB**: Public TLS terminated using ACM certificate for `greeting.<your-domain>`
-2. **ALB → greeting-service**: Re-encrypted using `backend-protocol: HTTPS` annotation; ALB connects to pod on port 8443
-3. **greeting-service → quote-service**: Internal TLS using PCA-issued certificates; services trust each other via shared CA
+2. **ALB → greeting-service**: Re-encrypted using `backend-protocol: HTTPS` annotation; ALB connects to pod on port 8443. Server-auth only - ALB does not present a client certificate, so greeting-service has `client-auth` set to `NONE` for ALB-facing traffic (handled by the ingress path)
+3. **greeting-service → quote-service**: Full mTLS using PCA-issued certificates. greeting-service presents its cert as client identity; quote-service verifies it via the shared root CA (`client-auth: NEED`)
 
 ### Health Checks
 
 ALB health checks use a separate HTTP port (8080) to avoid certificate validation complexity:
 - Main traffic: port 8443 (HTTPS)
 - Health checks: port 8080 (HTTP) → `/actuator/health`
+
+### ALB and mTLS - Design Trade-off
+
+ALB (L7) terminates TLS and re-encrypts to backends, but does not present a client certificate. This creates two categories of services:
+
+- **ALB-facing services** (e.g. greeting-service): cannot set `client-auth: NEED` - ALB won't satisfy it
+- **Internal-only services** (e.g. quote-service): can and should set `client-auth: NEED` for full mTLS
+
+The ALB → pod leg is still encrypted (server-auth TLS), but not mutually authenticated. For full mTLS on the ingress path, you'd need NLB (L4 passthrough) instead of ALB - but you'd lose ALB features like path/host routing, WAF, and sticky sessions. For most workloads, server-auth TLS from ALB + mTLS between services is the right balance.
+
+### Why Not Use ALB/Custom Domain URLs for Service-to-Service Calls?
+
+Services call each other directly using in-cluster DNS (e.g. `quote-service.quote-service-ns.svc.cluster.local:8443`) rather than going through the ALB or a public domain. Routing service-to-service traffic through the ALB has several downsides:
+
+- **Loses mTLS identity**: ALB terminates TLS and re-establishes a new session - the calling service's client cert is stripped, so the receiving service can't verify who's calling
+- **Public exposure**: Internal backend services would need their own ingress, creating an unnecessary public attack surface
+- **Internet round-trip**: Traffic goes out to the internet and back in, adding latency to every call
+- **Cost**: ALB charges per request and per hour; direct pod-to-pod calls are free
+- **Fragility**: Adds dependency on DNS, ALB health, and internet connectivity for internal communication
+
+Direct pod-to-pod calls via in-cluster DNS preserve mTLS identity, stay within the cluster network, and have no external dependencies. Telepresence provides the same direct access from a developer's local machine.
 
 ## Certificate Infrastructure
 
@@ -119,6 +140,7 @@ The CSI driver provisions certificates directly into pod filesystems - no Kubern
 - **Private key never leaves the node**: Keys are generated locally on the node by the CSI driver and never transmitted over the network
 - **Ephemeral lifecycle**: Volume is created at pod startup and destroyed at pod termination - no key material persists after the pod is gone
 - **No Kubernetes Secrets**: Nothing is stored in etcd - eliminates an entire class of secret-sprawl risks
+- **Node failure recovery**: If a node dies and the pod is rescheduled on another node, the CSI driver generates a brand new private key and gets a fresh cert issued. There is no key migration - the old key is gone (it was in RAM). The new cert has a different key pair but the same SAN and chains to the same root CA, so all trust relationships still work. Every pod restart gets a fresh key pair, limiting the blast radius of any key compromise to that pod's lifetime.
 
 **Benefits over Secret-based approach:**
 
@@ -216,6 +238,7 @@ server:
   port: 8443
   ssl:
     bundle: server
+    client-auth: NEED  # Require client certificate for mTLS
 
 management:
   server:
@@ -227,7 +250,7 @@ spring:
   ssl:
     bundle:
       pem:
-        # Server bundle - for terminating incoming TLS
+        # Server bundle - for terminating incoming TLS and verifying client certs
         server:
           keystore:
             certificate: /certs/tls.crt
@@ -236,11 +259,33 @@ spring:
             certificate: /certs/ca.crt
           reload-on-update: true  # Hot-reload on cert rotation
 
-        # Client bundle - for calling other services over TLS
+        # Client bundle - for calling other services over TLS (presents client cert)
         client:
+          keystore:
+            certificate: /certs/tls.crt
+            private-key: /certs/tls.key
           truststore:
             certificate: /certs/ca.crt
 ```
+
+### Server vs Client Certificates
+
+The PCA-issued certs include both `TLS Web Server Authentication` and `TLS Web Client Authentication` extended key usages, so the same cert/key pair serves as both server and client identity. The `server` bundle uses it to terminate incoming TLS; the `client` bundle uses it to authenticate when calling other services.
+
+### mTLS Between Services
+
+With `client-auth: NEED`, every service-to-service call is mutually authenticated:
+
+```
+greeting-service --> quote-service
+  1. quote-service presents its server cert (SAN: quote-service.quote-service-ns.svc.cluster.local)
+     greeting verifies it via client truststore (root CA) ✅
+  2. quote-service demands a client cert (client-auth: NEED)
+     greeting presents its cert via client keystore ✅
+  3. quote-service verifies greeting's cert via server truststore (same root CA) ✅
+```
+
+Both certs chain to the same PCA root CA, so mutual trust is automatic. The SAN doesn't need to match for client auth - it just needs to chain to a trusted CA. SAN matching only applies to server identity (hostname verification).
 
 ### Using the Client Bundle
 
@@ -260,7 +305,7 @@ public RestClient restClient(SslBundles sslBundles) {
 }
 ```
 
-The `client` bundle's truststore contains `ca.crt`, allowing greeting-service to verify quote-service's certificate was signed by the same CA.
+The `client` bundle's truststore contains `ca.crt`, allowing greeting-service to verify quote-service's certificate. The `client` bundle's keystore contains the same cert/key pair as the server bundle, which greeting-service presents as its client identity when quote-service requires mutual TLS.
 
 ## Prerequisites
 
@@ -486,6 +531,7 @@ server:
   port: 8443
   ssl:
     bundle: server
+    client-auth: NEED  # Require client certificate for mTLS
 
 management:
   server:
@@ -507,6 +553,9 @@ spring:
 
         # Only needed if calling other TLS services
         client:
+          keystore:
+            certificate: /certs/tls.crt
+            private-key: /certs/tls.key
           truststore:
             certificate: /certs/ca.crt
 ```

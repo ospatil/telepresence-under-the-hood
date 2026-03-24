@@ -23,5 +23,8 @@ spring:
             certificate: /certs/ca.crt
           reload-on-update: true
         client:
+          keystore:
+            certificate: /certs/tls.crt
+            private-key: /certs/tls.key
           truststore:
             certificate: /certs/ca.crt
