@@ -169,6 +169,7 @@ helm install aws-pca-issuer awspca/aws-privateca-issuer
 - 🔒 **In-memory only** (tmpfs) - keys never written to disk on the node
 - 🔒 **Key never leaves the node** - generated locally by CSI driver
 - 🔒 **Ephemeral** - destroyed when pod terminates, no Kubernetes Secrets in etcd
+- 🔒 **Per-pod unique keys** - each pod gets its own key pair, even replicas of the same service
 - 🔒 **Node failure** - pod rescheduled on new node gets a brand new key + cert (no key migration, old key gone from RAM)
 
 ---
