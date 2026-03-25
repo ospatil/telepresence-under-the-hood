@@ -48,7 +48,7 @@ ALB (L7) terminates TLS and re-encrypts to backends, but does not present a clie
 - **ALB-facing services** (e.g. greeting-service): cannot set `client-auth: NEED` - ALB won't satisfy it
 - **Internal-only services** (e.g. quote-service): can and should set `client-auth: NEED` for full mTLS
 
-The ALB → pod leg is still encrypted (server-auth TLS), but not mutually authenticated. For full mTLS on the ingress path, you'd need NLB (L4 passthrough) instead of ALB - but you'd lose ALB features like path/host routing, WAF, and sticky sessions. For most workloads, server-auth TLS from ALB + mTLS between services is the right balance.
+The ALB → pod leg is still encrypted (server-auth TLS), but not mutually authenticated. Full mTLS on the ingress path is impractical - it would require pods to present publicly trusted certs (ACM certs can't be exported to pods), and you'd lose ALB features like path/host routing and WAF. Server-auth TLS from ALB + mTLS between services covers both segments without exposing private CA certs to external clients.
 
 ### Why Not Use ALB/Custom Domain URLs for Service-to-Service Calls?
 

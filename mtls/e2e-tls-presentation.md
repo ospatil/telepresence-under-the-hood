@@ -44,8 +44,22 @@ style: |
 
 1. Architecture - how traffic flows
 2. Certificate infrastructure - PCA hierarchy + cert-manager CSI driver
-3. How apps use the certificates - Spring Boot SSL Bundles
+3. How apps use the certificates - Spring Boot SSL Bundles, TLS vs mTLS
 4. Telepresence - local development with app-managed TLS
+
+---
+
+
+## This Is a Reference Architecture, Not a Prescription
+
+Each layer is independently adoptable - pick what fits your environment:
+
+- Already have a CA? Skip the PCA hierarchy, point cert-manager at yours
+- Don't need mTLS? Drop `client-auth`, use TLS-only - same cert infrastructure works
+- Already using cert-manager? Just add the CSI driver and PCA issuer plugin
+- Have a different dev cert workflow? The Lambda approach is one option, not the only one
+
+The goal is to show what the pieces are and how they fit together.
 
 ---
 
@@ -105,9 +119,9 @@ style: |
            |--- developer local certs    (via Lambda + Secrets Manager)
 ```
 
-- **Root CA** - signs subordinate CAs only, never issues leaf certs
-- **Cluster CA** - cert-manager issues pod certs automatically
-- **Dev CA** - Lambda issues developer certs, stored in Secrets Manager
+- **Root CA** (general-purpose mode) - signs subordinate CAs only, never issues leaf certs
+- **Cluster CA** (short-lived mode, certs ≤7 days) - cert-manager issues pod certs automatically
+- **Dev CA** (short-lived mode, certs ≤7 days) - Lambda issues developer certs, stored in Secrets Manager
 - All certs chain to the same root --> **mutual trust is automatic**
 - Subordinates use `PathLen0` - cannot create further sub-CAs
 
@@ -217,6 +231,24 @@ spring:
 
 ---
 
+## Using the Client Bundle in Code
+
+```java
+@Bean
+public RestClient restClient(SslBundles sslBundles) {
+    SSLContext sslContext = sslBundles.getBundle("client").createSslContext();
+    HttpClient httpClient = HttpClient.newBuilder()
+            .sslContext(sslContext).build();
+    return RestClient.builder()
+            .baseUrl("https://quote-service.quote-service-ns.svc.cluster.local:8443")
+            .requestFactory(new JdkClientHttpRequestFactory(httpClient)).build();
+}
+```
+
+The `client` bundle's SSLContext includes both the truststore (verify server) and keystore (present client cert).
+
+---
+
 ## mTLS Flow + ALB Constraint
 
 ```
@@ -234,26 +266,27 @@ ALB terminates and re-encrypts TLS but **does not present a client certificate**
 | `client-auth` | not set (default NONE) | `NEED` |
 | Incoming TLS | Server-auth only | Full mTLS |
 
-- Full mTLS on ingress is possible with NLB (L4 passthrough) but adds complexity and loses path routing, WAF
-- **Server-auth from ALB + mTLS between services** is the right balance for most workloads
+- **Server-auth TLS from ALB + mTLS between services** covers both the ingress and service-to-service segments without exposing private CA certs to external clients
 
 ---
 
-## Using the Client Bundle in Code
+## TLS vs mTLS - It's a Choice
 
-```java
-@Bean
-public RestClient restClient(SslBundles sslBundles) {
-    SSLContext sslContext = sslBundles.getBundle("client").createSslContext();
-    HttpClient httpClient = HttpClient.newBuilder()
-            .sslContext(sslContext).build();
-    return RestClient.builder()
-            .baseUrl("https://quote-service.quote-service-ns.svc.cluster.local:8443")
-            .requestFactory(new JdkClientHttpRequestFactory(httpClient)).build();
-}
-```
+| | TLS (server-auth only) | mTLS (mutual auth) |
+|---|---|---|
+| Server presents cert | ✅ | ✅ |
+| Client presents cert | ❌ | ✅ |
+| Client verifies server identity | ✅ | ✅ |
+| Server verifies client identity | ❌ | ✅ |
+| Service-to-service via ALB (`https://quote.example.com`) | Works | Not possible (ALB strips client cert) |
+| Service-to-service via FQDN (`https://quote-service.ns.svc:8443`) | Works | Works |
+| Spring Boot config | `client-auth` not set | `client-auth: NEED` |
 
-The `client` bundle's SSLContext includes both the truststore (verify server) and keystore (present client cert).
+Both are valid choices:
+- **TLS only**: simpler setup, all service-to-service calls can go through ALB if desired, no client certs needed
+- **mTLS**: stronger security - services cryptographically verify the caller's identity, but requires direct pod-to-pod communication
+
+This demo uses mTLS between services to show the full capability. Dropping to TLS-only is a config change (`client-auth: NEED` → remove it).
 
 ---
 
@@ -332,6 +365,8 @@ curl http://service-a.ns:8080                        # --> cluster pod
 
 Multiple developers can intercept the **same service** simultaneously with different header values - no conflicts.
 
+Note: header-based intercepts require the agent to read HTTP headers, so they only work with plain HTTP traffic. With app-managed TLS (both TLS and mTLS), traffic is encrypted and headers are unreadable - only global intercepts work.
+
 ---
 
 ## Telepresence + App-Managed TLS
@@ -347,6 +382,10 @@ For Telepresence to work with app-managed TLS, the locally running service must:
 3. **Include a client keystore** so it can authenticate via mTLS when calling other services
 
 Without this, the intercepted traffic fails TLS handshake - the calling service expects a cert matching the in-cluster identity.
+
+With TLS-only (no mTLS), requirements simplify:
+- Point 3 is not needed (no client cert required)
+- If outbound calls go via ALB, point 2 is also not needed (ACM certs are publicly trusted)
 
 ---
 
@@ -369,86 +408,21 @@ Without this, the intercepted traffic fails TLS handshake - the calling service 
 
 - Dev certs valid for **7 days** (short-lived CA mode)
 - Developers only need `secretsmanager:GetSecretValue` - no PCA access
-- Private keys generated **inside Lambda**, never on developer machines
 - Separation of concerns: platform team controls issuance, developers consume certs
 
 ---
 
-## Dev Certificate Flow
+## Live Demo
 
-```
-  Developer
-  runs script
-      |
-      |  request-dev-cert.sh
-      v
-  +----------+          +----------------+          +-----------+
-  |  Lambda  | -------> |  Dev CA        | -------> |  AWS PCA  |
-  |          |          |  (subordinate) |          | (issue)   |
-  +----+-----+          +----------------+          +-----------+
-       |
-       |  stores cert + key
-       v
-  +------------------+
-  |  Secrets Manager |
-  +--------+---------+
-           |
-           |  fetch-dev-cert.sh
-           v
-  +------------------+
-  |  .certs/         |
-  |    tls.crt       |
-  |    tls.key       |
-  |    ca.crt        |
-  +------------------+
-```
+See [demo-runbook.md](./e2e-tls-demo/demo-runbook.md) for the guided walkthrough:
 
----
-
-## Intercept Mode - Route Cluster Traffic to Local
-
-```bash
-# Terminal 1 - run service locally with dev cert
-./scripts/run-local.sh greeting-service
-
-# Terminal 2 - start global intercept
-telepresence connect -n greeting-service-ns
-telepresence intercept greeting-service --port 8443:8443
-
-# Terminal 3 - test
-curl https://greeting.example.com/greeting          # via ALB
-curl --cacert .certs/greeting-service/ca.crt \       # via cluster DNS
-  https://greeting-service.greeting-service-ns.svc.cluster.local:8443/greeting
-```
-
-- **Global intercepts only** - header-based intercepts break with app-managed TLS
-- Traffic agent proxies at L4 (TCP) - TLS passes through opaquely
-- Header-based requires L7 inspection - agent can't read encrypted headers
-
----
-
-## Inspect Certificates
-
-```bash
-./scripts/inspect-cert.sh pod greeting-service
-
-# === Pod cert (greeting-service) ===
-# subject=CN=greeting-service
-# issuer=CN=e2e-tls-demo-cluster-ca
-# X509v3 Subject Alternative Name:
-#     DNS:greeting-service.greeting-service-ns.svc.cluster.local
-# SSL server: Yes, SSL client: Yes        <-- same cert works for both
-# Status: VALID (expires Mar 25 19:59:44 2026 GMT)
-
-./scripts/inspect-cert.sh local greeting-service
-
-# === Local dev cert (greeting-service) ===
-# subject=CN=greeting-service
-# issuer=CN=e2e-tls-demo-dev-ca           <-- different issuer
-# X509v3 Subject Alternative Name:
-#     DNS:greeting-service.greeting-service-ns.svc.cluster.local
-# SSL server: Yes, SSL client: Yes        <-- same capabilities
-# Status: VALID (expires Mar 31 ... 2026 GMT)
-```
-
-Different issuers, same SAN, same EKUs, same root CA trust --> **mutual trust works**
+1. Show AWS infrastructure (PCAs, ACM cert, ALB)
+2. Verify pods running without sidecars
+3. Inspect pod certificate (SAN, issuer, EKUs)
+4. Hit the public endpoint - full chain works
+5. **Prove mTLS is enforced** - curl without client cert → `certificate required`
+6. Issue and fetch dev cert via Lambda + Secrets Manager
+7. Compare dev cert with pod cert - same SAN, different issuer, same root CA
+8. Telepresence connect + global intercept
+9. Run local service with dev cert
+10. Test - traffic routed to local, local calls quote-service over mTLS

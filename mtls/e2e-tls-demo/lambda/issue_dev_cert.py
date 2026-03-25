@@ -82,8 +82,13 @@ def handler(event, context):
         CertificateAuthorityArn=ROOT_CA_ARN
     )
 
+    # Bundle leaf cert + intermediate (dev CA cert) for full chain
+    leaf = cert_resp["Certificate"].rstrip()
+    chain = cert_resp["CertificateChain"].rstrip()
+    full_chain = leaf + "\n" + chain
+
     secret_value = json.dumps({
-        "tls.crt": cert_resp["Certificate"],
+        "tls.crt": full_chain,
         "tls.key": key_pem,
         "ca.crt": root_resp["Certificate"],
     })
