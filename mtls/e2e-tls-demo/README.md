@@ -646,6 +646,23 @@ spec:
 
 ---
 
+## Authentication vs Authorization
+
+mTLS provides **authentication** - each service cryptographically proves its identity via the cert chain. But it does not provide **authorization** - any service with a cert chaining to the root CA can call any other service.
+
+### Authorization options for app-managed TLS
+
+| Approach | How it works | Trade-off |
+|---|---|---|
+| Application-level checks | Inspect client cert CN/SAN in code, reject unauthorized callers | Scatters auth logic across services |
+| Spring Security filter | Shared filter that checks client cert SAN against an allow-list | Requires a shared library, Java-only |
+| Kubernetes NetworkPolicies | Restrict pod-to-pod traffic at L3/L4 (IP/port) | Not identity-aware, operates below TLS |
+| Separate CAs per trust boundary | Services only trust the CA of their allowed callers | Doesn't scale, complex CA management |
+
+None of these are as clean as a service mesh's declarative authorization. Istio's `AuthorizationPolicy` uses the cryptographic SPIFFE identity from the mTLS cert to enforce access control at the infrastructure level - no app code, no shared libraries, no drift. See [Istio Ambient demo](../istio-ambient/istio-ambient-demo.md#phase-4-authorization-policies) for examples.
+
+This is one of the strongest reasons to consider a service mesh alongside or instead of app-managed TLS, depending on your authorization requirements.
+
 ## Files Reference
 
 ```

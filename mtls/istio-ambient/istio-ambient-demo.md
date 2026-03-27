@@ -206,7 +206,63 @@ kubectl run curl-test --image=curlimages/curl --rm --restart=Never -n default \
 
 External traffic shows encrypted gibberish; localhost traffic shows plain HTTP. Same proof as Linkerd, but without any sidecars.
 
-## Phase 4: Telepresence + Istio Ambient mTLS Demo
+## Phase 4: Authorization Policies
+
+Istio Ambient provides identity-aware authorization using the cryptographic SPIFFE identity embedded in each workload's mTLS cert. No app code changes needed.
+
+### 4.1 Default deny for quote-service namespace
+
+```bash
+kubectl apply -f deny-all-policy.yaml
+```
+
+Test - should fail:
+
+```bash
+kubectl run curl-test --image=curlimages/curl --rm -it --restart=Never -n default \
+  -- curl -s --max-time 10 service-c.service-c-ns:8080
+```
+
+### 4.2 Allow only service-c to call service-d
+
+```bash
+kubectl apply -f allow-service-c-policy.yaml
+```
+
+Test - service-c can call service-d:
+
+```bash
+kubectl run curl-test --image=curlimages/curl --rm -it --restart=Never -n default \
+  -- curl -s --max-time 10 service-c.service-c-ns:8080
+```
+
+The `principals` field uses the SPIFFE identity (`cluster.local/ns/<namespace>/sa/<service-account>`) which is cryptographically verified via the mTLS cert - not a header or label that can be spoofed.
+
+### 4.3 AuthorizationPolicy vs Kubernetes NetworkPolicy
+
+| | Kubernetes NetworkPolicy | Istio AuthorizationPolicy |
+|---|---|---|
+| Operates at | L3/L4 (IP, port) | L4 (identity, port) + L7 (method, path) |
+| Identity | Pod IP / namespace label selectors | Cryptographic SPIFFE identity from mTLS cert |
+| Spoofable? | Labels are metadata, not proof | No - identity is in the TLS cert |
+| L7 awareness | None | HTTP method, path, headers (with waypoint) |
+
+NetworkPolicies are still valuable as defense-in-depth - block traffic at the network level before it reaches the mesh. They complement Istio policies rather than replace them.
+
+### 4.4 L4 vs L7 policies in Ambient
+
+- **L4 policies** (source identity, port) are enforced by ztunnel directly - no extra components needed
+- **L7 policies** (HTTP method, path, headers) require a waypoint proxy for the namespace
+- For most authorization needs, L4 identity-based policies are sufficient
+
+### 4.5 Cleanup
+
+```bash
+kubectl delete -f deny-all-policy.yaml
+kubectl delete -f allow-service-c-policy.yaml
+```
+
+## Phase 5: Telepresence + Istio Ambient mTLS Demo
 
 Istio Ambient defaults to PERMISSIVE mTLS - it accepts both mTLS (from meshed pods) and plain HTTP (from unmeshed sources like Telepresence).
 

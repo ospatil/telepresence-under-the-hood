@@ -427,3 +427,18 @@ See [demo-runbook.md](./e2e-tls-demo/demo-runbook.md) for the guided walkthrough
 8. Telepresence connect + global intercept
 9. Run local service with dev cert
 10. Test - traffic routed to local, local calls quote-service over mTLS
+
+---
+
+## Where a Service Mesh Adds Value
+
+App-managed TLS gives you authentication. For authorization and beyond, a service mesh is worth considering:
+
+- **Declarative authorization** - identity-aware access control (`AuthorizationPolicy`) using SPIFFE identities - each workload gets a cryptographic identity based on its namespace and service account, embedded in its mTLS cert. No app code needed.
+- **Traffic management** - canary deployments, traffic splitting, fault injection, retries (L7 features via waypoint proxy in Ambient)
+- **Zero app changes** - apps stay plain HTTP, any language/framework works
+- **Built-in CA** - no PCA cost, no cert-manager setup
+- **Simpler onboarding** - namespace label vs CSI volume + SSL bundle config per service
+- **Automatic request-level telemetry** - complements Container Insights + X-Ray without per-service instrumentation
+
+App-managed TLS and service mesh can coexist - different namespaces, different approaches. Start with what fits your requirements.
