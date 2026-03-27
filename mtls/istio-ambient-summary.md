@@ -29,6 +29,14 @@
 - It does NOT replace VPC CNI - it layers alongside it, making Istio Ambient CNI-agnostic
 - This is also why namespace enrollment needs no pod restarts - the CNI plugin handles redirection without modifying pods
 
+## Traffic Routing and Service Resolution
+
+- For meshed traffic, ztunnel preempts the node's service routing - it resolves Services to pod IPs and connects directly to the destination pod's ztunnel
+- On standard EKS, kube-proxy handles service routing for non-meshed traffic via iptables/IPVS. On EKS Auto Mode, there is no kube-proxy - VPC CNI handles service routing natively via eBPF
+- In both cases, ztunnel's behavior is the same: istio-cni redirects meshed traffic to ztunnel before the node's service routing layer
+- ztunnel gets routing info via istiod, which watches the Kubernetes API (EndpointSlices, Pods, Services) and pushes config to ztunnel via xDS (Envoy's discovery protocol - the standard API for dynamically delivering routing, endpoint, and cluster configuration to proxies)
+- Flow: Kubernetes API → istiod (aggregates config) → xDS push to ztunnel → ztunnel routes to pod IPs
+
 ## Certificate Management
 
 - `istiod` has a built-in CA by default - zero cert setup for basic mTLS

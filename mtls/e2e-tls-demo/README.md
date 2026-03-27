@@ -32,7 +32,7 @@ End-to-end TLS encryption from ALB to Spring Boot pods using AWS Private CA, cer
 ### Traffic Flow
 
 1. **Internet → ALB**: Public TLS terminated using ACM certificate for `greeting.<your-domain>`
-2. **ALB → greeting-service**: Re-encrypted using `backend-protocol: HTTPS` annotation; ALB connects to pod on port 8443. Server-auth only - ALB does not present a client certificate, so greeting-service has `client-auth` set to `NONE` for ALB-facing traffic (handled by the ingress path)
+2. **ALB → greeting-service**: Re-encrypted using `backend-protocol: HTTPS` annotation; ALB connects to pod on port 8443. ALB does not present a client certificate, but greeting-service uses `client-auth: WANT` so the connection succeeds (cert optional). When other services call greeting-service directly, they present a client cert and it's verified.
 3. **greeting-service → quote-service**: Full mTLS using PCA-issued certificates. greeting-service presents its cert as client identity; quote-service verifies it via the shared root CA (`client-auth: NEED`)
 
 ### Health Checks
@@ -41,14 +41,31 @@ ALB health checks use a separate HTTP port (8080) to avoid certificate validatio
 - Main traffic: port 8443 (HTTPS)
 - Health checks: port 8080 (HTTP) → `/actuator/health`
 
-### ALB and mTLS - Design Trade-off
+### Spring Boot `client-auth` Modes
 
-ALB (L7) terminates TLS and re-encrypts to backends, but does not present a client certificate. This creates two categories of services:
+| Mode | Behavior | Use case |
+|---|---|---|
+| `NONE` (default) | Client cert not requested | Services that don't need client identity |
+| `WANT` | Client cert requested but optional - verified if present, connection succeeds without one | ingress services: ALB doesn't send a client cert, but direct callers can |
+| `NEED` | Client cert required - connection fails without one | internal services: enforce mTLS for all callers |
 
-- **ALB-facing services** (e.g. greeting-service): cannot set `client-auth: NEED` - ALB won't satisfy it
-- **Internal-only services** (e.g. quote-service): can and should set `client-auth: NEED` for full mTLS
+In this demo:
+- **greeting-service** uses `WANT` - accepts ALB traffic (no client cert) and direct calls with client certs
+- **quote-service** uses `NEED` - only called by greeting-service, which always presents a client cert
 
-The ALB → pod leg is still encrypted (server-auth TLS), but not mutually authenticated. Full mTLS on the ingress path is impractical - it would require pods to present publicly trusted certs (ACM certs can't be exported to pods), and you'd lose ALB features like path/host routing and WAF. Server-auth TLS from ALB + mTLS between services covers both segments without exposing private CA certs to external clients.
+This avoids splitting services into two categories. `WANT` is similar in spirit to Istio's PERMISSIVE mTLS mode - verify when possible, don't break when not.
+
+### ALB and mTLS
+
+ALB (L7) terminates TLS and re-encrypts to backends, but does not present a client certificate. With `client-auth: WANT` on ingress services, this is handled gracefully - the ALB connection succeeds without a client cert, while direct service-to-service calls still get full mTLS verification.
+
+Full mTLS on the ingress path is impractical - it would require pods to present publicly trusted certs (ACM certs can't be exported to pods), and you'd lose ALB features like path/host routing and WAF. Server-auth TLS from ALB + mTLS between services covers both segments without exposing private CA certs to external clients.
+
+**Why can't ALB or NLB solve this?**
+- **ALB** does not support presenting a client certificate to backends. It terminates TLS and initiates a new session with no customization points. ALB can forward external client cert metadata via `X-Amzn-Mtls-Clientcert` headers, but that's the external caller's cert, not a PCA-issued one.
+- **NLB** (TCP passthrough) passes the external client's TLS session directly to the pod. The pod would need a publicly trusted cert (PCA certs aren't), and any client cert would be the external caller's - not from your internal PCA hierarchy.
+
+The ALB is effectively the trust boundary between two domains: publicly trusted certs (ACM) on the outside, PCA certs on the inside. `client-auth: WANT` on ingress services bridges this cleanly.
 
 ### Why Not Use ALB/Custom Domain URLs for Service-to-Service Calls?
 

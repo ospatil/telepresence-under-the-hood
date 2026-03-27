@@ -80,7 +80,7 @@ The goal is to show what the pieces are and how they fit together.
   |  (internet-facing)  |  re-encrypts to pod,
   +---------------------+  Provisioned by AWS LB Controller
             |
-            |  HTTPS :8443 (PCA cert, server-auth only - ALB doesn't send client cert)
+            |  HTTPS :8443 (PCA cert, client-auth: WANT - ALB has no client cert, succeeds anyway)
             v
   +---------------------+
   |  greeting-service   |  App terminates TLS,
@@ -96,8 +96,8 @@ The goal is to show what the pieces are and how they fit together.
 ```
 
 - Every segment is TLS-encrypted. Health checks use a separate plain HTTP port (8080)
-- ALB → pod is server-auth only (ALB doesn't present a client cert)
-- Pod → pod is full mTLS (both sides present and verify certs via shared root CA)
+- ALB → pod: `client-auth: WANT` - ALB has no client cert, connection succeeds anyway
+- Pod → pod: `client-auth: NEED` - full mTLS, both sides present and verify certs
 
 ---
 
@@ -205,7 +205,7 @@ server:
   port: 8443
   ssl:
     bundle: server
-    client-auth: NEED    # Require client certificate (internal services)
+    client-auth: WANT    # WANT for ingress, NEED for internal
 
 spring:
   ssl:
@@ -259,15 +259,15 @@ greeting-service --> quote-service
   3. quote verifies greeting's cert via server truststore (same root CA)  ✅
 ```
 
-ALB terminates and re-encrypts TLS but **does not present a client certificate**:
+ALB does not present a client certificate. Spring Boot's `client-auth` modes handle this:
 
-| | ALB-facing services | Internal-only services |
+| Mode | Behavior | Use case |
 |---|---|---|
-| Example | greeting-service | quote-service |
-| `client-auth` | not set (default NONE) | `NEED` |
-| Incoming TLS | Server-auth only | Full mTLS |
+| `NONE` | Client cert not requested | No client identity needed |
+| `WANT` | Optional - verified if present, succeeds without | ingress services (greeting-service) |
+| `NEED` | Required - fails without client cert | internal services (quote-service) |
 
-- **Server-auth TLS from ALB + mTLS between services** covers both the ingress and service-to-service segments without exposing private CA certs to external clients
+`WANT` avoids splitting services into two categories - similar to Istio's PERMISSIVE mode
 
 ---
 
@@ -281,7 +281,7 @@ ALB terminates and re-encrypts TLS but **does not present a client certificate**
 | Server verifies client identity | ❌ | ✅ |
 | Service-to-service via ALB (`https://quote.example.com`) | Works | Not possible (ALB strips client cert) |
 | Service-to-service via FQDN (`https://quote-service.ns.svc:8443`) | Works | Works |
-| Spring Boot config | `client-auth` not set | `client-auth: NEED` |
+| Spring Boot config | `client-auth` not set | `client-auth: NEED` (or `WANT` for ingress) |
 
 Both are valid choices:
 - **TLS only**: simpler setup, all service-to-service calls can go through ALB if desired, no client certs needed
