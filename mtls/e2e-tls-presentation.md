@@ -80,7 +80,7 @@ The goal is to show what the pieces are and how they fit together.
   |  (internet-facing)  |  re-encrypts to pod,
   +---------------------+  Provisioned by AWS LB Controller
             |
-            |  HTTPS :8443 (PCA cert, client-auth: WANT - ALB has no client cert, succeeds anyway)
+            |  HTTPS :8443 (PCA cert, client-auth: WANT)
             v
   +---------------------+
   |  greeting-service   |  App terminates TLS,
@@ -158,8 +158,8 @@ helm install aws-pca-issuer awspca/aws-privateca-issuer
 ```
 
 1. Pod spec declares CSI volume with cert attributes (issuer, DNS names, duration)
-2. CSI driver generates key on the node, requests cert via cert-manager → AWS PCA
-3. Cert written to pod tmpfs at configurable mount path (e.g. `/certs/`)
+2. CSI driver generates key directly into the pod's tmpfs volume (RAM, not disk), sends only the CSR (public info) to cert-manager → AWS PCA
+3. Cert written to the same tmpfs volume at configurable mount path (e.g. `/certs/`)
 4. Same cert serves as both server and client identity (PCA certs include both EKUs - Extended Key Usages)
 
 ---
@@ -205,7 +205,7 @@ server:
   port: 8443
   ssl:
     bundle: server
-    client-auth: WANT    # WANT for ingress, NEED for internal
+    client-auth: WANT    # verify client cert if present, succeed without
 
 spring:
   ssl:
@@ -440,5 +440,6 @@ App-managed TLS gives you authentication. For authorization and beyond, a servic
 - **Built-in CA** - no PCA cost, no cert-manager setup
 - **Simpler onboarding** - namespace label vs CSI volume + SSL bundle config per service
 - **Automatic request-level telemetry** - complements Container Insights + X-Ray without per-service instrumentation
+- **Header-based Telepresence intercepts work** - apps speak plain HTTP, so the traffic agent can read headers. In dev environments with PERMISSIVE mode, multiple developers can intercept the same service simultaneously
 
 App-managed TLS and service mesh can coexist - different namespaces, different approaches. Start with what fits your requirements.
