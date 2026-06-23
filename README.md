@@ -59,6 +59,10 @@ This intercepts only requests matching a specific HTTP header, allowing multiple
 * Stop proxying - `telepresence leave service-a-deployment`
 * Stop local Telepresence Daemons - `telepresence quit -s`
 
+### Presentation
+
+* [Marp Presentation — Telepresence Under the Hood (engage modes + TLS implications)](./telepresence-presentation.md)
+
 ### Peeking under the hood
 
 Refer to [Connectivity Analysis](./connectivity-analysis.md)

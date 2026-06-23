@@ -373,6 +373,19 @@ Telepresence allows you to develop locally while connected to the cluster networ
 
 The cert-manager CSI driver stores private keys in tmpfs (in-memory only) - they never touch disk and never leave the node. Extracting certs from pods via `kubectl exec` would undermine this security model by copying the private key over the network onto your laptop.
 
+**The same caveat applies to Telepresence volume mounts.** When you intercept or replace a pod, Telepresence mirrors that pod's volume mounts to your laptop over sshfs - and it filters by mount name, not by volume source type, so the CSI `/certs` tmpfs volume is exported like any other. That would hand your local process the pod's *real* `tls.key`, again copying a per-pod private key off the node and defeating the CSI driver's in-memory guarantee. It is also more tempting than `kubectl exec` because it looks "free" - no separate cert to issue. The dev-cert path below avoids this: a separately-issued, short-lived cert from the dev CA, never the pod's own key. An admin can also explicitly exclude the certs mount from being exported with the `telepresence.io/inject-ignore-volume-mounts` annotation on the workload (a comma-separated list of volume names):
+
+```yaml
+metadata:
+  annotations:
+    telepresence.io/inject-ignore-volume-mounts: "tls"   # the CSI cert volume name
+```
+
+> **Source investigation (Telepresence `release/v2`, verified June 2026).** The claims above were checked against the Telepresence source, not docs:
+> - **CSI/tmpfs volumes are exported.** `pkg/agentmap/generator.go` (`newContainerConfig`) iterates the target container's `VolumeMounts` and never inspects `pod.Spec.Volumes` or the volume *source* type; `pkg/agentconfig/volumes.go` (`appendVolumeMounts`) operates on `core.VolumeMount` (name + path only). A mount is skipped only when its policy resolves to `MountPolicyIgnore`. So a CSI ephemeral / tmpfs volume is mirrored like any Secret or ConfigMap mount - the agent is a sidecar in the same pod and just references the existing pod volume by name.
+> - **Exclusion annotation.** `pkg/annotation/annotation.go` defines `InjectIgnoreVolumeMounts = DomainPrefix + "inject-ignore-volume-mounts"` with `DomainPrefix = "telepresence.io/"` (legacy: `telepresence.getambassador.io/inject-ignore-volume-mounts`). `integration_test/ignored_mounts_test.go` applies it as a workload annotation whose value is a comma-separated list of volume *names*. A related `telepresence.io/mount-policies` annotation can also force per-mount policies.
+> - **Not verified:** whether `inotify`/file-watch events (used by Spring Boot `reload-on-update`) propagate over sshfs - cert rotation mid-session may not hot-reload locally. Treat as a separate open question.
+
 Instead, a Lambda function issues dev certificates from the dev subordinate CA and stores them in AWS Secrets Manager. No private keys are generated on any developer or admin machine:
 
 ```bash
@@ -436,7 +449,7 @@ It's the public certificate of the AWS Private CA root. Your client needs it to 
 
 ### 2. Intercept Mode - Route Cluster Traffic to Local Service
 
-Use this when you want to intercept traffic destined for a cluster service and handle it locally. Note: only global intercepts work with app-managed TLS (see important considerations below).
+Use this when you want to intercept traffic destined for a cluster service and handle it locally. Note: only global intercepts work with app-managed TLS (see important considerations below). Use a separately-issued dev cert, not the pod's own - do not rely on Telepresence mirroring the pod's `/certs` volume to your laptop (see [Dev Certificate Issuance](#dev-certificate-issuance) for why this defeats the CSI driver's key-never-leaves-the-node guarantee).
 
 **Quick start with script:**
 ```bash
@@ -682,8 +695,6 @@ e2e-tls-demo/
 │   └── inspect-cert.sh       # Inspect local dev certs or pod certs
 ├── lambda/
 │   └── issue_dev_cert.py     # Lambda: issues cert from dev CA, stores in Secrets Manager
-├── diagrams/
-│   └── e2e-tls-demo.drawio   # All diagrams (4 tabs: Architecture, Cert Flow, Connect, Intercept)
 ├── greeting-service/
 │   ├── pom.xml
 │   ├── Dockerfile
